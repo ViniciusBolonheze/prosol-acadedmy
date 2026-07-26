@@ -1,0 +1,15 @@
+===================================================
+PROSOL ACADEMY - Sistema de Gestão de Atletas
+===================================================
+
+Como utilizar:
+
+1. Extraia o arquivo 'prosol_academy.zip' em uma pasta no computador.
+2. Abra o arquivo 'index.html' dando duplo clique.
+
+Funcionalidades incluídas e ativas:
+- Cadastro completo de novos atletas (Nome, Apelido, Nasc., Responsável, Telefone, Turma e Foto).
+- Ordenação automática dos atletas cadastrados por turma e em ordem alfabética.
+- Persistência dos dados no navegador (LocalStorage).
+- Módulo de Nova Chamada com lista de presença por turma.
+- Histórico de chamadas salvas com opção de visualização de detalhes e exclusão.

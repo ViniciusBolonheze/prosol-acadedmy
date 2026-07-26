@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Prosol Academy - Gestão de Atletas</title>
+    <link rel="stylesheet" href="css/style.css"/>
+</head>
+<body>
+    <!-- Tela de Login -->
+    <div class="page active" id="login">
+        <div class="login-card">
+            <div class="logo-box">
+                <img src="Logo academy.jpg" alt="Logo Prosol Academy" style="max-width: 160px; height: auto; margin-bottom: 15px; display: block; margin-left: auto; margin-right: auto;"/>
+                <h1>PROSOL ACADEMY</h1>
+                <p>Sistema de Gestão Esportiva</p>
+            </div>
+            <button class="enter" onclick="openApp()">ENTRAR NO SISTEMA</button>
+        </div>
+    </div>
+
+    <!-- Aplicação Principal -->
+    <div class="page" id="app">
+        <header>
+            <div class="header-title">Prosol Academy</div>
+            <button class="btn-logout" onclick="logout()">Sair</button>
+        </header>
+        
+        <nav>
+            <button class="tab-btn active" onclick="showTab(0)">Atletas</button>
+            <button class="tab-btn" onclick="showTab(1)">Nova Chamada</button>
+            <button class="tab-btn" onclick="showTab(2)">Chamadas</button>
+            <button class="tab-btn" onclick="showTab(3)">Relatório de Frequência</button>
+        </nav>
+
+        <main>
+            <!-- TAB 0: ATLETAS -->
+            <section id="tab0">
+                <div class="top-actions" style="display:flex; gap:10px; flex-wrap:wrap;">
+                    <button class="primary" onclick="openNewAthleteForm()">+ NOVO ATLETA</button>
+                    <button class="btn-secondary" style="background:#84cc16; color:#000; font-weight:bold;" onclick="toggleReportOptions()">📄 RELATÓRIO DE ATLETAS</button>
+                </div>
+
+                <!-- Painel de Configuração do Relatório de Atletas -->
+                <div class="card hidden" id="reportOptionsCard" style="border: 1px solid #84cc16;">
+                    <h3 style="color:#84cc16; margin-bottom:10px;">Geração de Relatório de Atletas</h3>
+                    <p style="color:#ccc; font-size:0.85rem; margin-bottom:15px;">Selecione os campos desejados e clique para abrir a aba do relatório com a opção de compartilhamento em PDF:</p>
+                    
+                   	 <div class="report-checkboxes">
+    				<label><input type="checkbox" id="rep_nome" checked disabled/> Nome Completo (Obrigatório)</label>
+    				<label><input type="checkbox" id="rep_apelido" checked/> Apelido</label>
+    				<label><input type="checkbox" id="rep_dataNasc" checked/> Data de Nascimento</label>
+    				<label><input type="checkbox" id="rep_turma"/> Turma</label>
+    				<label><input type="checkbox" id="rep_telAtleta"/> Telefone do Atleta</label>
+    				<label><input type="checkbox" id="rep_responsavel"/> Responsável</label>
+    				<label><input type="checkbox" id="rep_telefone"/> Telefone do Responsável</label>
+    				<label><input type="checkbox" id="rep_indicacao" checked/> Indicação</label>
+			</div>
+
+                    <div style="margin-top:15px; display:flex; gap:10px; flex-wrap:wrap;">
+                        <button class="primary" style="background:#84cc16; color:#000;" onclick="openAthletesReportTab()">🚀 Abrir / Gerar Relatório e Compartilhar</button>
+                        <button class="btn-secondary" onclick="toggleReportOptions()">Fechar</button>
+                    </div>
+                </div>
+
+                <!-- Formulário de Cadastro -->
+                <div class="card hidden" id="form">
+                    <h3 id="formAthleteTitle">Cadastrar Novo Atleta</h3>
+                    <form id="athleteForm" onsubmit="saveAthlete(event)">
+                        <input type="hidden" id="athleteId" value=""/>
+                        <input type="hidden" id="athleteDataCadastro" value=""/>
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label>Nome Completo *</label>
+                                <input type="text" id="nome" placeholder="Ex: João Miguel Silva" required/>
+                            </div>
+                            <div class="form-group">
+                                <label>Apelido *</label>
+                                <input type="text" id="apelido" placeholder="Ex: Jojô" required/>
+                            </div>
+                            <div class="form-group">
+                                <label>Data de Nascimento *</label>
+                                <input type="date" id="dataNasc" required/>
+                            </div>
+                            <div class="form-group">
+                                <label>Turma / Horário *</label>
+                                <select id="turma" required>
+                                    <option value="">Selecione uma turma...</option>
+                                    <option value="Segunda e Quarta - 18:30 às 19:30">Segunda e Quarta - 18:30 às 19:30</option>
+                                    <option value="Segunda e Quarta - 19:40 às 20:40">Segunda e Quarta - 19:40 às 20:40</option>
+                                    <option value="Terça e Quinta - 18:30 às 19:30">Terça e Quinta - 18:30 às 19:30</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Indicação (Quem indicou?) (Opcional)</label>
+                                <input type="text" id="indicacao" placeholder="Ex: Pedro Henrique / Amigo da escola"/>
+                            </div>
+                            <div class="form-group">
+                                <label>Telefone / WhatsApp do Atleta (Opcional)</label>
+                                <input type="tel" id="telefoneAtleta" placeholder="Ex: (43) 99999-0000"/>
+                            </div>
+                            <div class="form-group">
+                                <label>Nome do Responsável (Opcional)</label>
+                                <input type="text" id="responsavel" placeholder="Ex: Carlos Miguel"/>
+                            </div>
+                            <div class="form-group">
+                                <label>Telefone / WhatsApp do Responsável (Opcional)</label>
+                                <input type="tel" id="telefone" placeholder="Ex: (43) 99999-8888"/>
+                            </div>
+                            <div class="form-group full-width">
+                                <label>Foto do Atleta (Opcional)</label>
+                                <input type="file" id="foto" accept="image/*" onchange="previewPhoto(event)"/>
+                                <div id="photoPreviewContainer" class="hidden">
+                                    <img id="photoPreview" src="" alt="Prévia"/>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-buttons">
+                            <button type="submit" class="primary" id="btnSaveAthlete">Salvar Atleta</button>
+                            <button type="button" class="btn-secondary" onclick="toggleForm()">Cancelar</button>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- Tabela de Atletas -->
+                <div class="card">
+                    <div class="card-header-compact">
+                        <div class="title-info">
+                            <h3>Atletas Cadastrados (<span id="totalAtletas">0</span>)</h3>
+                            <small>(Ordenados por turma e ordem alfabética)</small>
+                        </div>
+
+                        <div class="filter-box-compact">
+                            <div class="filter-group-inline">
+                                <label>Turma:</label>
+                                <select id="filterTurma" onchange="applyFilters()">
+                                    <option value="TODAS">Todas</option>
+                                    <option value="Segunda e Quarta - 18:30 às 19:30">Segunda e Quarta - 18:30 às 19:30</option>
+                                    <option value="Segunda e Quarta - 19:40 às 20:40">Segunda e Quarta - 19:40 às 20:40</option>
+                                    <option value="Terça e Quinta - 18:30 às 19:30">Terça e Quinta - 18:30 às 19:30</option>
+                                </select>
+                            </div>
+
+                            <div class="filter-group-inline">
+                                <label>Nascimento:</label>
+                                <div id="filterYearCheckboxes" class="years-checkbox-container-inline">
+                                    <!-- Gerado via JS -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="table-responsive">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Foto</th>
+                                    <th>Nome / Apelido</th>
+                                    <th>Nascimento</th>
+                                    <th>Turma</th>
+                                    <th>Indicação</th>
+                                    <th>Responsável / Tel</th>
+                                    <th>Ações</th>
+                                </tr>
+                            </thead>
+                            <tbody id="athletesTableBody">
+                                <!-- Preenchido dinamicamente -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 1: NOVA CHAMADA -->
+            <section class="hidden" id="tab1">
+                <div class="card">
+                    <h3 id="attendanceFormTitle">Registrar Nova Chamada</h3>
+                    <form id="attendanceForm" onsubmit="saveAttendance(event)">
+                        <input type="hidden" id="attendanceId" value=""/>
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label>Data da Aula *</label>
+                                <input type="date" id="chamadaData" onchange="loadAttendanceList()" required/>
+                            </div>
+                            <div class="form-group">
+                                <label>Selecione a Turma *</label>
+                                <select id="chamadaTurma" onchange="loadAttendanceList()" required>
+                                    <option value="">Selecione uma turma...</option>
+                                    <option value="Segunda e Quarta - 18:30 às 19:30">Segunda e Quarta - 18:30 às 19:30</option>
+                                    <option value="Segunda e Quarta - 19:40 às 20:40">Segunda e Quarta - 19:40 às 20:40</option>
+                                    <option value="Terça e Quinta - 18:30 às 19:30">Terça e Quinta - 18:30 às 19:30</option>
+                                </select>
+                            </div>
+                            <div class="form-group full-width">
+                                <label>Informações / Observações do Treino (Opcional)</label>
+                                <input type="text" id="chamadaObs" placeholder="Ex: Treino realizado sob chuva leve / Exercícios de finalização"/>
+                            </div>
+                        </div>
+
+                        <div class="attendance-section">
+                            <h4 style="margin-top:15px; margin-bottom:10px;">Lista de Atletas Cadastrados Até a Data da Aula</h4>
+                            <div id="attendanceChecklist" class="checklist-container">
+                                <p class="empty-msg">Selecione a data e a turma acima para carregar os atletas.</p>
+                            </div>
+                        </div>
+
+                        <div style="display:flex; gap:10px; margin-top:20px;">
+                            <button type="submit" class="primary" id="btnSaveAttendance">Salvar Chamada</button>
+                            <button type="button" class="btn-secondary hidden" id="btnCancelAttendanceEdit" onclick="cancelAttendanceEdit()">Cancelar Edição</button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
+            <!-- TAB 2: CHAMADAS SALVAS -->
+            <section class="hidden" id="tab2">
+                <div class="card">
+                    <h3>Chamadas Salvas</h3>
+                    
+                    <div class="filter-period-box">
+                        <div class="filter-period-inputs">
+                            <div class="filter-group-inline">
+                                <label>Data Inicial:</label>
+                                <input type="date" id="filterDataInicio" onchange="renderAttendanceHistory()"/>
+                            </div>
+                            <div class="filter-group-inline">
+                                <label>Data Final:</label>
+                                <input type="date" id="filterDataFim" onchange="renderAttendanceHistory()"/>
+                            </div>
+                            <button class="btn-secondary" onclick="clearDateFilter()">Limpar Datas</button>
+                        </div>
+                        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                            <button class="primary" style="background:#84cc16; color:#000;" onclick="openFilteredAttendancesTab()">🚀 Abrir Relatório de Chamadas e Compartilhar PDF</button>
+                        </div>
+                    </div>
+
+                    <div class="table-responsive">
+    			<table id="attendanceTable" style="table-layout: fixed; width: 100%;">
+        			<thead>
+           			 <tr>
+               			 <th>Data</th>
+               			 <th>Turma</th>
+               			 <th>Presentes</th>
+               			 <th>Observações do Treino</th>
+               			 <th>Ações</th>
+          			  </tr>
+        			</thead>
+       			 <tbody id="attendanceTableBody">
+           			 <!-- Preenchido dinamicamente -->
+       			 </tbody>
+    			</table>
+			</div>
+                </div>
+            </section>
+
+            <!-- TAB 3: RELATÓRIO DE FREQUÊNCIA -->
+            <section class="hidden" id="tab3">
+                <div class="card">
+                    <h3>Relatório Geral de Frequência</h3>
+                    <p style="color: #aaa; margin-bottom: 15px; font-size: 0.9rem;">
+                        Acompanhe o total de aulas realizadas pela turma, presenças, faltas e o percentual de assiduidade de cada aluno.
+                    </p>
+                    <div class="table-responsive">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Atleta</th>
+                                    <th>Turma</th>
+                                    <th>Presenças</th>
+                                    <th>Faltas</th>
+                                    <th>Frequência (Pós-Cadastro)</th>
+                                    <th>Frequência (Geral)</th>
+                                    <th>Detalhes</th>
+                                </tr>
+                            </thead>
+                            <tbody id="reportTableBody">
+                                <!-- Preenchido dinamicamente -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Modal para Visualizar Detalhes -->
+    <div id="modal" class="modal hidden">
+        <div class="modal-content">
+            <span class="close-modal" onclick="closeModal()">&times;</span>
+            <div id="modalDetails"></div>
+        </div>
+    </div>
+
+    <script src="js/script.js"></script>
+</body>
+</html>
