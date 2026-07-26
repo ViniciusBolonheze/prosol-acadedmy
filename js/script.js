@@ -1,20 +1,60 @@
-// --- ARMAZENAMENTO LOCAL ---
-let globalAthletes = JSON.parse(localStorage.getItem('prosol_athletes')) || [];
-let globalAttendance = JSON.parse(localStorage.getItem('prosol_attendance')) || [];
+// --- CONFIGURAÇÃO DO SUPABASE ---
+const SUPABASE_URL = 'https://smyyaugghkiofqiibpjo.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_1wTBxq7IVU5QzxxsWqla6A_uIfyvhTA';
 
-function saveData() {
-    localStorage.setItem('prosol_athletes', JSON.stringify(globalAthletes));
-    localStorage.setItem('prosol_attendance', JSON.stringify(globalAttendance));
+const _supabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+let globalAthletes = [];
+let globalAttendance = [];
+
+// Função para carregar todos os dados da nuvem ao iniciar o app
+async function loadDataFromSupabase() {
+    try {
+        const { data: athletes, error: errAthletes } = await _supabase.from('atletas').select('*');
+        if (errAthletes) console.error('Erro ao buscar atletas:', errAthletes.message);
+        else globalAthletes = athletes || [];
+
+        const { data: attendance, error: errAttendance } = await _supabase.from('chamadas').select('*');
+        if (errAttendance) console.error('Erro ao buscar chamadas:', errAttendance.message);
+        else globalAttendance = attendance || [];
+    } catch (err) {
+        console.error('Erro de conexão com o Supabase:', err);
+    }
+}
+
+// Substitui o antigo saveData para enviar direto para o Supabase
+async function saveData(type, dataObj) {
+    if (type === 'athlete') {
+        const { error } = await _supabase.from('atletas').upsert([dataObj]);
+        if (error) alert('Erro ao salvar atleta na nuvem: ' + error.message);
+    } else if (type === 'attendance') {
+        const { error } = await _supabase.from('chamadas').upsert([dataObj]);
+        if (error) alert('Erro ao salvar chamada na nuvem: ' + error.message);
+    }
+}
+
+// Funções para excluir da nuvem
+async function deleteAthleteFromCloud(id) {
+    const { error } = await _supabase.from('atletas').delete().eq('id', id);
+    if (error) alert('Erro ao excluir atleta: ' + error.message);
+}
+
+async function deleteAttendanceFromCloud(id) {
+    const { error } = await _supabase.from('chamadas').delete().eq('id', id);
+    if (error) alert('Erro ao excluir chamada: ' + error.message);
 }
 
 // --- CONTROLE DE NAVEGAÇÃO ---
 
-function openApp() {
+async function openApp() {
     document.getElementById('login').style.display = 'none';
     document.getElementById('app').classList.add('active');
     
     const today = new Date().toISOString().split('T')[0];
     document.getElementById('chamadaData').value = today;
+    
+    // Baixa os dados do Supabase antes de renderizar a tela
+    await loadDataFromSupabase();
     
     renderAthletesTable();
 }
