@@ -189,7 +189,7 @@ function saveAthlete(event) {
         globalAthletes.push(athleteData);
     }
 
-    saveData();
+    saveData('athlete', athleteData);
     alert('Atleta salvo com sucesso!');
 
     document.getElementById('athleteForm').reset();
@@ -235,7 +235,7 @@ function editAthlete(id) {
 function deleteAthlete(id) {
     if (confirm('Tem certeza que deseja excluir este atleta?')) {
         globalAthletes = globalAthletes.filter(a => a.id !== id);
-        saveData();
+        deleteAthleteFromCloud(id);
         renderAthletesTable();
     }
 }
@@ -849,7 +849,7 @@ function saveAttendance(event) {
         globalAttendance.push(recordData);
     }
 
-    saveData();
+    saveData('attendance', recordData);
     alert(`Chamada salva com sucesso! ${presentes.length} presente(s).`);
 
     cancelAttendanceEdit();
@@ -890,7 +890,7 @@ function cancelAttendanceEdit() {
 function deleteAttendance(id) {
     if (confirm('Deseja excluir este registro de chamada?')) {
         globalAttendance = globalAttendance.filter(r => r.id !== id);
-        saveData();
+        deleteAttendanceFromCloud(id);
         renderAttendanceHistory();
     }
 }
@@ -1272,6 +1272,5 @@ function viewAthleteDates(athleteId) {
         ${datesListHtml}
     `;
 
-    document.getElementById('modal').classList.add('hidden'); // Corrigido para abrir o modal em vez de fechar
     document.getElementById('modal').classList.remove('hidden');
 }
