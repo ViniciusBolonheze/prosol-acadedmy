@@ -1,289 +1,674 @@
-// --- CONFIGURAÇÃO DO SUPABASE ---
+/* ==========================================================================
+   PROSOL ACADEMY - Sistema de Gestão Esportiva
+   script.js - v2.0 (responsivo: notebook + celular)
+   ========================================================================== */
+
+'use strict';
+
+/* --------------------------------------------------------------------------
+   1. CONFIGURAÇÃO
+   -------------------------------------------------------------------------- */
 const SUPABASE_URL = 'https://smyyaugghkiofqiibpjo.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_1wTBxq7IVU5QzxxsWqla6A_uIfyvhTA';
 
-const _supabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+/** Turmas do sistema — altere AQUI e reflete em todos os selects/relatórios. */
+const TURMAS = [
+    'Segunda e Quarta - 18:30 às 19:30',
+    'Segunda e Quarta - 19:40 às 20:40',
+    'Terça e Quinta - 18:30 às 19:30'
+];
+
+const LS_ATHLETES = 'prosol_athletes_cache';
+const LS_ATTENDANCE = 'prosol_attendance_cache';
+
+let _supabase = null;
+try {
+    if (typeof supabase !== 'undefined' && supabase.createClient) {
+        _supabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    }
+} catch (e) {
+    console.warn('Supabase indisponível, usando somente cache local.', e);
+}
 
 let globalAthletes = [];
 let globalAttendance = [];
 
-// Função para carregar todos os dados da nuvem ao iniciar o app
-async function loadDataFromSupabase() {
+/* --------------------------------------------------------------------------
+   2. UTILITÁRIOS
+   -------------------------------------------------------------------------- */
+const $ = (id) => document.getElementById(id);
+
+function esc(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/**
+ * Normaliza qualquer data para o padrão ISO (AAAA-MM-DD).
+ * A base atual mistura "DD/MM/AAAA" (atletas) e "AAAA-MM-DD" (chamadas).
+ */
+function toISO(v) {
+    if (!v) return '';
+    const s = String(v).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;                    // já ISO
+    const br = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/); // DD/MM/AAAA
+    if (br) return `${br[3]}-${br[2].padStart(2, '0')}-${br[1].padStart(2, '0')}`;
+    const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);            // AAAA-M-D
+    if (iso) return `${iso[1]}-${iso[2].padStart(2, '0')}-${iso[3].padStart(2, '0')}`;
+    const d = new Date(s);
+    if (!isNaN(d.getTime())) {
+        return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().split('T')[0];
+    }
+    return '';
+}
+
+/** Exibe qualquer data no formato brasileiro DD/MM/AAAA. */
+function fmtDate(v) {
+    const iso = toISO(v);
+    return iso ? iso.split('-').reverse().join('/') : '-';
+}
+
+function getYear(v) {
+    const iso = toISO(v);
+    return iso ? iso.split('-')[0] : '';
+}
+
+/** Normaliza os registros vindos da nuvem para uso interno consistente. */
+function normalizeAthlete(a) {
+    return Object.assign({}, a, {
+        id: String(a.id),
+        nome: (a.nome || '').trim(),
+        apelido: a.apelido || '',
+        dataNasc: toISO(a.dataNasc),
+        dataCadastro: toISO(a.dataCadastro),
+        turma: a.turma || '',
+        indicacao: a.indicacao || '-',
+        telefoneAtleta: a.telefoneAtleta || '-',
+        responsavel: a.responsavel || '-',
+        telefone: a.telefone || '-',
+        foto: a.foto || ''
+    });
+}
+
+function normalizeAttendance(r) {
+    return Object.assign({}, r, {
+        id: String(r.id),
+        data: toISO(r.data),
+        turma: r.turma || '',
+        obs: r.obs || '-',
+        presentes: Array.isArray(r.presentes)
+            ? r.presentes.map(n => String(n).trim())
+            : (typeof r.presentes === 'string' ? tryParseArray(r.presentes) : [])
+    });
+}
+
+function tryParseArray(s) {
+    try { const v = JSON.parse(s); return Array.isArray(v) ? v.map(x => String(x).trim()) : []; }
+    catch (e) { return s ? s.split(',').map(x => x.trim()) : []; }
+}
+
+/* --------------------------------------------------------------------------
+   VÍNCULO CHAMADA ↔ ATLETA
+   As chamadas gravam o NOME do atleta. Se o cadastro é renomeado (ou foi
+   digitado sem acento/abreviado), o vínculo quebra e a frequência zera.
+   As funções abaixo fazem a correspondência tolerante a acentos, caixa,
+   espaços e abreviações ("Daniel G. Miranda" → "Daniel Gonçalves Miranda").
+   -------------------------------------------------------------------------- */
+function normName(s) {
+    return String(s || '')
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase().replace(/[^a-z0-9\s]/g, ' ')
+        .replace(/\s+/g, ' ').trim();
+}
+
+let _matchCache = new Map();
+function resetMatchCache() { _matchCache = new Map(); }
+
+/** Resolve um nome gravado na chamada para o atleta correspondente. */
+function resolveAthleteByName(nome) {
+    const key = normName(nome);
+    if (!key) return null;
+    if (_matchCache.has(key)) return _matchCache.get(key);
+
+    let found = globalAthletes.find(a => normName(a.nome) === key);
+
+    if (!found) {
+        // prefixo: um nome é o começo do outro (nome completo x resumido)
+        const cand = globalAthletes.filter(a => {
+            const n = normName(a.nome);
+            return n.startsWith(key + ' ') || key.startsWith(n + ' ');
+        });
+        if (cand.length === 1) found = cand[0];
+    }
+
+    if (!found) {
+        // abreviações: mesmo primeiro e último nome
+        const t = key.split(' ');
+        if (t.length >= 2) {
+            const cand = globalAthletes.filter(a => {
+                const n = normName(a.nome).split(' ');
+                return n.length >= 2 && n[0] === t[0] && n[n.length - 1] === t[t.length - 1];
+            });
+            if (cand.length === 1) found = cand[0];
+        }
+    }
+
+    _matchCache.set(key, found || null);
+    return found || null;
+}
+
+/** Conjunto de IDs dos atletas presentes em um registro de chamada. */
+function presentIdSet(record) {
+    const set = new Set();
+    (record.presentes || []).forEach(n => {
+        const a = resolveAthleteByName(n);
+        if (a) set.add(String(a.id));
+    });
+    return set;
+}
+
+/* --------------------------------------------------------------------------
+   GERAÇÃO DE ID DE ATLETA
+   O banco usa IDs sequenciais ("1", "2", ... "86"). Gerar ID com Date.now()
+   produziria números de 13 dígitos, que estouram colunas do tipo INT4 no
+   Postgres/Supabase (limite 2.147.483.647) e quebrariam o padrão da base.
+   Aqui sempre pegamos "maior ID + 1", reaproveitando buracos só quando não
+   houver risco de colisão.
+   -------------------------------------------------------------------------- */
+function nextAthleteId() {
+    const usados = new Set(globalAthletes.map(a => String(a.id)));
+    const numericos = globalAthletes
+        .map(a => Number(a.id))
+        .filter(n => Number.isFinite(n) && n > 0 && n < 2147483000);
+
+    let proximo = (numericos.length ? Math.max(...numericos) : 0) + 1;
+    while (usados.has(String(proximo))) proximo++;
+    return String(proximo);
+}
+
+/**
+ * Remove/renomeia um atleta dentro das chamadas já salvas.
+ * As chamadas guardam NOMES, então excluir (ou renomear) um atleta deixaria
+ * "nomes órfãos" e o contador de presentes ficaria maior que a lista real.
+ * Retorna os registros de chamada que precisam ser regravados na nuvem.
+ */
+function syncAttendanceNames(nomeAntigo, nomeNovo) {
+    const alvo = normName(nomeAntigo);
+    if (!alvo) return [];
+    const alterados = [];
+
+    globalAttendance.forEach(rec => {
+        if (!Array.isArray(rec.presentes)) return;
+        const original = rec.presentes;
+        let mudou = false;
+
+        const novos = [];
+        original.forEach(n => {
+            if (normName(n) === alvo) {
+                mudou = true;
+                if (nomeNovo) novos.push(nomeNovo); // renomeou
+                // se nomeNovo for null, o nome simplesmente sai (exclusão)
+            } else {
+                novos.push(n);
+            }
+        });
+
+        if (mudou) {
+            rec.presentes = novos;
+            alterados.push(rec);
+        }
+    });
+
+    return alterados;
+}
+
+/** Formata telefone só com dígitos para exibição legível. */
+function fmtPhone(v) {
+    if (!v || v === '-') return '';
+    const d = String(v).replace(/\D/g, '');
+    if (d.length === 11) return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
+    if (d.length === 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
+    return String(v);
+}
+
+function todayISO() {
+    const d = new Date();
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().split('T')[0];
+}
+
+function isMobile() { return window.matchMedia('(max-width: 780px)').matches; }
+
+/** Notificação discreta (substitui alert em ações comuns). */
+function toast(msg, type) {
+    const box = $('toastBox');
+    if (!box) { alert(msg); return; }
+    const el = document.createElement('div');
+    el.className = 'toast' + (type ? ' ' + type : '');
+    el.textContent = msg;
+    box.appendChild(el);
+    setTimeout(() => {
+        el.style.transition = 'opacity .3s, transform .3s';
+        el.style.opacity = '0';
+        el.style.transform = 'translateY(10px)';
+        setTimeout(() => el.remove(), 320);
+    }, 2800);
+}
+
+function setSyncStatus(state, label) {
+    const el = $('syncStatus');
+    if (!el) return;
+    el.className = 'sync-dot ' + state;
+    el.title = label;
+    el.innerHTML = '<span>' + esc(label) + '</span>';
+}
+
+/** Preenche todos os <select> marcados com as turmas configuradas. */
+function populateTurmaSelects() {
+    document.querySelectorAll('select[data-turmas]').forEach(sel => {
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">Selecione uma turma...</option>' +
+            TURMAS.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
+        if (cur) sel.value = cur;
+    });
+    document.querySelectorAll('select[data-turmas-filtro]').forEach(sel => {
+        const cur = sel.value;
+        sel.innerHTML = '<option value="TODAS">Todas as turmas</option>' +
+            TURMAS.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
+        if (cur) sel.value = cur;
+    });
+}
+
+/* --------------------------------------------------------------------------
+   3. PERSISTÊNCIA (Supabase + cache local offline)
+   -------------------------------------------------------------------------- */
+function saveLocalCache() {
     try {
-        const { data: athletes, error: errAthletes } = await _supabase.from('atletas').select('*');
-        if (errAthletes) console.error('Erro ao buscar atletas:', errAthletes.message);
-        else globalAthletes = athletes || [];
+        localStorage.setItem(LS_ATHLETES, JSON.stringify(globalAthletes));
+        localStorage.setItem(LS_ATTENDANCE, JSON.stringify(globalAttendance));
+    } catch (e) { /* quota excedida (fotos grandes) — ignora */ }
+}
 
-        const { data: attendance, error: errAttendance } = await _supabase.from('chamadas').select('*');
-        if (errAttendance) console.error('Erro ao buscar chamadas:', errAttendance.message);
-        else globalAttendance = attendance || [];
+function loadLocalCache() {
+    try {
+        globalAthletes = JSON.parse(localStorage.getItem(LS_ATHLETES) || '[]').map(normalizeAthlete);
+        globalAttendance = JSON.parse(localStorage.getItem(LS_ATTENDANCE) || '[]').map(normalizeAttendance);
+        resetMatchCache();
+    } catch (e) {
+        globalAthletes = []; globalAttendance = [];
+    }
+}
+
+async function loadDataFromSupabase() {
+    if (!_supabase) {
+        loadLocalCache();
+        setSyncStatus('offline', 'Offline (local)');
+        return;
+    }
+    setSyncStatus('', 'Sincronizando…');
+    try {
+        const [resA, resC] = await Promise.all([
+            _supabase.from('atletas').select('*'),
+            _supabase.from('chamadas').select('*')
+        ]);
+
+        if (resA.error) throw resA.error;
+        if (resC.error) throw resC.error;
+
+        globalAthletes = (resA.data || []).map(normalizeAthlete);
+        globalAttendance = (resC.data || []).map(normalizeAttendance);
+        resetMatchCache();
+        saveLocalCache();
+        setSyncStatus('online', 'Sincronizado');
     } catch (err) {
-        console.error('Erro de conexão com o Supabase:', err);
+        console.error('Erro ao carregar do Supabase:', err);
+        loadLocalCache();
+        setSyncStatus('error', 'Offline (cache)');
+        toast('Sem conexão com a nuvem. Exibindo dados salvos no aparelho.', 'warn');
     }
 }
 
-// Substitui o antigo saveData para enviar direto para o Supabase
 async function saveData(type, dataObj) {
-    if (type === 'athlete') {
-        const { error } = await _supabase.from('atletas').upsert([dataObj]);
-        if (error) alert('Erro ao salvar atleta na nuvem: ' + error.message);
-    } else if (type === 'attendance') {
-        const { error } = await _supabase.from('chamadas').upsert([dataObj]);
-        if (error) alert('Erro ao salvar chamada na nuvem: ' + error.message);
+    saveLocalCache();
+    if (!_supabase) return;
+    const table = type === 'athlete' ? 'atletas' : 'chamadas';
+    try {
+        const { error } = await _supabase.from(table).upsert([dataObj]);
+        if (error) throw error;
+        setSyncStatus('online', 'Sincronizado');
+    } catch (error) {
+        console.error(error);
+        setSyncStatus('error', 'Erro de sincronia');
+        toast('Erro ao salvar na nuvem: ' + (error.message || error), 'error');
     }
 }
 
-// Funções para excluir da nuvem
 async function deleteAthleteFromCloud(id) {
+    saveLocalCache();
+    if (!_supabase) return;
     const { error } = await _supabase.from('atletas').delete().eq('id', id);
-    if (error) alert('Erro ao excluir atleta: ' + error.message);
+    if (error) toast('Erro ao excluir atleta: ' + error.message, 'error');
 }
 
 async function deleteAttendanceFromCloud(id) {
+    saveLocalCache();
+    if (!_supabase) return;
     const { error } = await _supabase.from('chamadas').delete().eq('id', id);
-    if (error) alert('Erro ao excluir chamada: ' + error.message);
+    if (error) toast('Erro ao excluir chamada: ' + error.message, 'error');
 }
 
-// --- CONTROLE DE NAVEGAÇÃO ---
-
+/* --------------------------------------------------------------------------
+   4. NAVEGAÇÃO
+   -------------------------------------------------------------------------- */
 async function openApp() {
-    document.getElementById('login').style.display = 'none';
-    document.getElementById('app').classList.add('active');
-    
-    const today = new Date().toISOString().split('T')[0];
-    document.getElementById('chamadaData').value = today;
-    
-    // Baixa os dados do Supabase antes de renderizar a tela
+    $('login').classList.remove('active');
+    $('login').style.display = 'none';
+    $('app').classList.add('active');
+
+    $('chamadaData').value = todayISO();
+
     await loadDataFromSupabase();
-    
     renderAthletesTable();
 }
 
 function logout() {
-    document.getElementById('app').classList.remove('active');
-    document.getElementById('login').style.display = 'flex';
+    $('app').classList.remove('active');
+    $('login').style.display = '';
+    $('login').classList.add('active');
+    window.scrollTo(0, 0);
 }
 
+let currentTab = 0;
 function showTab(index) {
-    const buttons = document.querySelectorAll('#app nav button');
-    const sections = document.querySelectorAll('#app main section');
-    
-    buttons.forEach((btn, i) => btn.classList.toggle('active', i === index));
-    sections.forEach((sec, i) => sec.classList.toggle('hidden', i !== index));
+    currentTab = index;
+
+    document.querySelectorAll('nav.top-tabs .tab-btn')
+        .forEach((btn, i) => btn.classList.toggle('active', i === index));
+    document.querySelectorAll('#bottomNav button')
+        .forEach((btn, i) => btn.classList.toggle('active', i === index));
+    document.querySelectorAll('#app main section')
+        .forEach((sec, i) => sec.classList.toggle('hidden', i !== index));
 
     if (index === 0) renderAthletesTable();
-    if (index === 1) {
-        // Se não estiver editando, limpa/reseta para o padrão de nova chamada
-        if (!document.getElementById('attendanceId').value) {
-            loadAttendanceList();
-        }
-    }
+    if (index === 1 && !$('attendanceId').value) loadAttendanceList();
     if (index === 2) renderAttendanceHistory();
     if (index === 3) renderAttendanceReport();
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
+/* --------------------------------------------------------------------------
+   5. FORMULÁRIO DE ATLETA
+   -------------------------------------------------------------------------- */
+let currentPhotoBase64 = '';
+
 function openNewAthleteForm() {
-    document.getElementById('athleteId').value = '';
-    document.getElementById('athleteDataCadastro').value = '';
-    document.getElementById('athleteForm').reset();
-    document.getElementById('formAthleteTitle').textContent = 'Cadastrar Novo Atleta';
-    document.getElementById('btnSaveAthlete').textContent = 'Salvar Atleta';
-    currentPhotoBase64 = "";
-    document.getElementById('photoPreviewContainer').classList.add('hidden');
-    document.getElementById('form').classList.remove('hidden');
+    $('athleteId').value = '';
+    $('athleteDataCadastro').value = '';
+    $('athleteForm').reset();
+    $('formAthleteTitle').textContent = 'Cadastrar Novo Atleta';
+    $('btnSaveAthlete').textContent = 'Salvar Atleta';
+    currentPhotoBase64 = '';
+    $('photoPreviewContainer').classList.add('hidden');
+    $('form').classList.remove('hidden');
+    $('form').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setTimeout(() => $('nome').focus(), 300);
 }
 
 function toggleForm() {
-    const formContainer = document.getElementById('form');
-    formContainer.classList.toggle('hidden');
-    if (formContainer.classList.contains('hidden')) {
-        document.getElementById('athleteId').value = '';
-        document.getElementById('athleteDataCadastro').value = '';
-        document.getElementById('athleteForm').reset();
-        currentPhotoBase64 = "";
-        document.getElementById('photoPreviewContainer').classList.add('hidden');
+    const el = $('form');
+    el.classList.toggle('hidden');
+    if (el.classList.contains('hidden')) {
+        $('athleteId').value = '';
+        $('athleteDataCadastro').value = '';
+        $('athleteForm').reset();
+        currentPhotoBase64 = '';
+        $('photoPreviewContainer').classList.add('hidden');
     }
 }
 
 function toggleReportOptions() {
-    const card = document.getElementById('reportOptionsCard');
-    card.classList.toggle('hidden');
+    $('reportOptionsCard').classList.toggle('hidden');
 }
 
-let currentPhotoBase64 = "";
+/** Lê a foto e comprime para no máx. 600px — essencial em celular. */
 function previewPhoto(event) {
     const file = event.target.files[0];
-    if (file) {
-        const reader = new FileReader();
-        reader.onload = function(e) {
-            currentPhotoBase64 = e.target.result;
-            document.getElementById('photoPreview').src = currentPhotoBase64;
-            document.getElementById('photoPreviewContainer').classList.remove('hidden');
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = function (e) {
+        const img = new Image();
+        img.onload = function () {
+            const MAX = 600;
+            let { width, height } = img;
+            if (width > MAX || height > MAX) {
+                const r = Math.min(MAX / width, MAX / height);
+                width = Math.round(width * r);
+                height = Math.round(height * r);
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = width; canvas.height = height;
+            canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+            try {
+                currentPhotoBase64 = canvas.toDataURL('image/jpeg', 0.8);
+            } catch (err) {
+                currentPhotoBase64 = e.target.result;
+            }
+            $('photoPreview').src = currentPhotoBase64;
+            $('photoPreviewContainer').classList.remove('hidden');
         };
-        reader.readAsDataURL(file);
-    }
+        img.onerror = function () {
+            currentPhotoBase64 = e.target.result;
+            $('photoPreview').src = currentPhotoBase64;
+            $('photoPreviewContainer').classList.remove('hidden');
+        };
+        img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
 }
 
-function openPhotoNewTab(base64Image) {
-    if (!base64Image) return;
-    const imageWindow = window.open("");
-    imageWindow.document.write(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Foto do Atleta</title>
-            <style>
-                body { margin: 0; background-color: #111; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-                img { max-width: 90vw; max-height: 90vh; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.8); }
-            </style>
-        </head>
-        <body>
-            <img src="${base64Image}" alt="Foto do Atleta">
-        </body>
-        </html>
-    `);
+function openPhotoNewTab(athleteId) {
+    const a = globalAthletes.find(x => String(x.id) === String(athleteId));
+    if (!a || !a.foto) return;
+    const w = window.open('');
+    if (!w) return;
+    w.document.write(`<!DOCTYPE html><html><head><title>Foto - ${esc(a.nome)}</title>
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <style>body{margin:0;background:#111;display:flex;justify-content:center;align-items:center;min-height:100vh}
+        img{max-width:95vw;max-height:95vh;border-radius:8px}</style></head>
+        <body><img src="${a.foto}" alt="Foto"></body></html>`);
+    w.document.close();
 }
-
-// --- CADASTRO E EDIÇÃO DE ATLETAS ---
 
 function saveAthlete(event) {
     event.preventDefault();
-    
-    const id = document.getElementById('athleteId').value;
-    const existingDataCadastro = document.getElementById('athleteDataCadastro').value;
-    const nome = document.getElementById('nome').value.trim();
-    const apelido = document.getElementById('apelido').value.trim();
-    const dataNasc = document.getElementById('dataNasc').value;
-    const turma = document.getElementById('turma').value;
-    
-    const indicacao = document.getElementById('indicacao').value.trim();
-    const telefoneAtleta = document.getElementById('telefoneAtleta').value.trim();
-    const responsavel = document.getElementById('responsavel').value.trim();
-    const telefone = document.getElementById('telefone').value.trim();
+
+    const id = $('athleteId').value;
+    const existingDataCadastro = $('athleteDataCadastro').value;
+    const nome = $('nome').value.trim();
+    const apelido = $('apelido').value.trim();
+    const dataNasc = $('dataNasc').value;
+    const turma = $('turma').value;
+    const indicacao = $('indicacao').value.trim();
+    const telefoneAtleta = $('telefoneAtleta').value.trim();
+    const responsavel = $('responsavel').value.trim();
+    const telefone = $('telefone').value.trim();
 
     if (!nome || !apelido || !dataNasc || !turma) {
-        alert('Por favor, preencha todos os campos obrigatórios (*): Nome, Apelido, Data de Nascimento e Turma.');
+        toast('Preencha os campos obrigatórios: Nome, Apelido, Nascimento e Turma.', 'error');
         return;
     }
 
-    const todayStr = new Date().toISOString().split('T')[0];
+    // Preserva quaisquer campos extras já existentes no banco (ex.: Documento)
+    const previous = id ? globalAthletes.find(a => String(a.id) === String(id)) : null;
 
-    const athleteData = {
-        id: id || Date.now().toString(),
-        dataCadastro: existingDataCadastro || todayStr,
-        nome,
-        apelido,
-        dataNasc,
+    const athleteData = Object.assign({}, previous || {}, {
+        id: id || nextAthleteId(),
+        dataCadastro: toISO(existingDataCadastro) || todayISO(),
+        nome, apelido,
+        dataNasc: toISO(dataNasc),
         turma,
         indicacao: indicacao || '-',
         telefoneAtleta: telefoneAtleta || '-',
         responsavel: responsavel || '-',
         telefone: telefone || '-',
         foto: currentPhotoBase64
-    };
+    });
+
+    const doc = $('documento') ? $('documento').value.trim() : '';
+    if (doc || 'Documento' in athleteData) athleteData.Documento = doc || null;
+
+    let chamadasAtualizadas = [];
 
     if (id) {
-        const index = globalAthletes.findIndex(a => a.id === id);
-        if (index !== -1) globalAthletes[index] = athleteData;
+        const i = globalAthletes.findIndex(a => String(a.id) === String(id));
+        const nomeAnterior = i !== -1 ? globalAthletes[i].nome : null;
+        if (i !== -1) globalAthletes[i] = athleteData;
+
+        // Se o nome mudou, atualiza as chamadas já salvas para o vínculo não quebrar
+        if (nomeAnterior && normName(nomeAnterior) !== normName(nome)) {
+            chamadasAtualizadas = syncAttendanceNames(nomeAnterior, nome);
+        }
     } else {
         globalAthletes.push(athleteData);
     }
 
+    resetMatchCache();
     saveData('athlete', athleteData);
-    alert('Atleta salvo com sucesso!');
+    chamadasAtualizadas.forEach(rec => saveData('attendance', rec));
 
-    document.getElementById('athleteForm').reset();
-    document.getElementById('athleteId').value = '';
-    document.getElementById('athleteDataCadastro').value = '';
-    currentPhotoBase64 = "";
-    document.getElementById('photoPreviewContainer').classList.add('hidden');
-    document.getElementById('form').classList.add('hidden');
+    let msg = id ? 'Atleta atualizado com sucesso!' : 'Atleta cadastrado com sucesso!';
+    if (chamadasAtualizadas.length) {
+        msg += ` ${chamadasAtualizadas.length} chamada(s) ajustada(s) com o novo nome.`;
+    }
+    toast(msg);
+
+    $('athleteForm').reset();
+    $('athleteId').value = '';
+    $('athleteDataCadastro').value = '';
+    currentPhotoBase64 = '';
+    $('photoPreviewContainer').classList.add('hidden');
+    $('form').classList.add('hidden');
     renderAthletesTable();
 }
 
 function editAthlete(id) {
-    const athlete = globalAthletes.find(a => a.id === id);
-    if (!athlete) return;
+    const a = globalAthletes.find(x => String(x.id) === String(id));
+    if (!a) return;
 
-    document.getElementById('athleteId').value = athlete.id;
-    document.getElementById('athleteDataCadastro').value = athlete.dataCadastro || '';
-    document.getElementById('nome').value = athlete.nome;
-    document.getElementById('apelido').value = athlete.apelido;
-    document.getElementById('dataNasc').value = athlete.dataNasc;
-    document.getElementById('turma').value = athlete.turma;
-    
-    document.getElementById('indicacao').value = athlete.indicacao === '-' ? '' : (athlete.indicacao || '');
-    document.getElementById('telefoneAtleta').value = athlete.telefoneAtleta === '-' ? '' : (athlete.telefoneAtleta || '');
-    document.getElementById('responsavel').value = athlete.responsavel === '-' ? '' : (athlete.responsavel || '');
-    document.getElementById('telefone').value = athlete.telefone === '-' ? '' : (athlete.telefone || '');
+    const clean = (v) => (v === '-' ? '' : (v || ''));
 
-    if (athlete.foto) {
-        currentPhotoBase64 = athlete.foto;
-        document.getElementById('photoPreview').src = athlete.foto;
-        document.getElementById('photoPreviewContainer').classList.remove('hidden');
+    $('athleteId').value = a.id;
+    $('athleteDataCadastro').value = a.dataCadastro || '';
+    $('nome').value = a.nome || '';
+    $('apelido').value = a.apelido || '';
+    $('dataNasc').value = a.dataNasc || '';
+    $('turma').value = a.turma || '';
+    $('indicacao').value = clean(a.indicacao);
+    $('telefoneAtleta').value = fmtPhone(a.telefoneAtleta);
+    $('responsavel').value = clean(a.responsavel);
+    $('telefone').value = fmtPhone(a.telefone);
+    if ($('documento')) $('documento').value = a.Documento || '';
+
+    if (a.foto) {
+        currentPhotoBase64 = a.foto;
+        $('photoPreview').src = a.foto;
+        $('photoPreviewContainer').classList.remove('hidden');
     } else {
-        currentPhotoBase64 = "";
-        document.getElementById('photoPreviewContainer').classList.add('hidden');
+        currentPhotoBase64 = '';
+        $('photoPreviewContainer').classList.add('hidden');
     }
 
-    document.getElementById('formAthleteTitle').textContent = 'Editar Atleta';
-    document.getElementById('btnSaveAthlete').textContent = 'Atualizar Atleta';
-    document.getElementById('form').classList.remove('hidden');
-    document.getElementById('form').scrollIntoView({ behavior: 'smooth' });
+    $('formAthleteTitle').textContent = 'Editar Atleta';
+    $('btnSaveAthlete').textContent = 'Atualizar Atleta';
+    $('form').classList.remove('hidden');
+    closeModal();
+    $('form').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function deleteAthlete(id) {
-    if (confirm('Tem certeza que deseja excluir este atleta?')) {
-        globalAthletes = globalAthletes.filter(a => a.id !== id);
-        deleteAthleteFromCloud(id);
-        renderAthletesTable();
+    const a = globalAthletes.find(x => String(x.id) === String(id));
+    if (!a) return;
+
+    // Quantas chamadas registram presença deste atleta?
+    const comPresenca = globalAttendance.filter(rec => presentIdSet(rec).has(String(a.id)));
+
+    let aviso = `Excluir o atleta "${a.nome}"?\n\nEsta ação não pode ser desfeita.`;
+    if (comPresenca.length) {
+        aviso += `\n\nAtenção: ele tem presença em ${comPresenca.length} chamada(s).` +
+                 `\nO nome dele será removido dessas chamadas para os totais continuarem corretos.`;
     }
+    if (!confirm(aviso)) return;
+
+    // 1) tira o nome das chamadas salvas (evita "nome órfão" e contagem inflada)
+    const chamadasAfetadas = syncAttendanceNames(a.nome, null);
+
+    // 2) remove o atleta
+    globalAthletes = globalAthletes.filter(x => String(x.id) !== String(id));
+    resetMatchCache();
+
+    // 3) grava tudo na nuvem
+    deleteAthleteFromCloud(id);
+    chamadasAfetadas.forEach(rec => saveData('attendance', rec));
+
+    closeModal();
+    renderAthletesTable();
+
+    toast(chamadasAfetadas.length
+        ? `Atleta excluído e removido de ${chamadasAfetadas.length} chamada(s).`
+        : 'Atleta excluído.');
 }
 
-// --- FILTROS E RENDERIZAÇÃO DE ATLETAS ---
-
+/* --------------------------------------------------------------------------
+   6. FILTROS E LISTAGEM DE ATLETAS
+   -------------------------------------------------------------------------- */
 function updateYearCheckboxes() {
-    const container = document.getElementById('filterYearCheckboxes');
+    const container = $('filterYearCheckboxes');
     if (!container) return;
 
-    const years = [...new Set(globalAthletes.map(a => a.dataNasc ? a.dataNasc.split('-')[0] : null).filter(Boolean))].sort();
+    const years = [...new Set(globalAthletes.map(a => getYear(a.dataNasc)).filter(Boolean))].sort();
 
     if (years.length === 0) {
-        container.innerHTML = '<span style="color:#aaa; font-size:0.8rem;">Sem dados</span>';
+        container.innerHTML = '<span style="color:var(--text-mute); font-size:.8rem;">Sem dados</span>';
         return;
     }
 
-    const currentChecked = Array.from(document.querySelectorAll('.filter-year-cb:checked')).map(cb => cb.value);
-
-    container.innerHTML = years.map(year => {
-        const isChecked = currentChecked.includes(year) ? 'checked' : '';
-        return `
-            <label>
-                <input type="checkbox" value="${year}" class="filter-year-cb" ${isChecked} onchange="applyFilters()">
-                ${year}
-            </label>
-        `;
-    }).join('');
+    const checked = Array.from(document.querySelectorAll('.filter-year-cb:checked')).map(cb => cb.value);
+    container.innerHTML = years.map(y =>
+        `<label><input type="checkbox" value="${y}" class="filter-year-cb" ${checked.includes(y) ? 'checked' : ''} onchange="applyFilters()"> ${y}</label>`
+    ).join('');
 }
 
 function applyFilters() {
-    const selectedTurma = document.getElementById('filterTurma').value;
-    const checkedYearCBs = Array.from(document.querySelectorAll('.filter-year-cb:checked')).map(cb => cb.value);
+    const turma = $('filterTurma') ? $('filterTurma').value : 'TODAS';
+    const term = ($('searchAthlete') ? $('searchAthlete').value : '').trim().toLowerCase();
+    const years = Array.from(document.querySelectorAll('.filter-year-cb:checked')).map(cb => cb.value);
 
-    let filtered = [...globalAthletes];
+    let list = [...globalAthletes];
 
-    if (selectedTurma !== 'TODAS') {
-        filtered = filtered.filter(a => a.turma === selectedTurma);
+    if (turma && turma !== 'TODAS') list = list.filter(a => a.turma === turma);
+
+    if (years.length) {
+        list = list.filter(a => years.includes(getYear(a.dataNasc)));
     }
 
-    if (checkedYearCBs.length > 0) {
-        filtered = filtered.filter(a => {
-            const athleteYear = a.dataNasc ? a.dataNasc.split('-')[0] : '';
-            return checkedYearCBs.includes(athleteYear);
+    if (term) {
+        const digits = term.replace(/\D/g, '');
+        list = list.filter(a => {
+            const hay = [a.nome, a.apelido, a.responsavel, a.Documento].map(v => (v || '').toLowerCase());
+            if (hay.some(v => v.includes(term))) return true;
+            if (digits.length >= 3) {
+                const tels = [a.telefone, a.telefoneAtleta, a.Documento]
+                    .map(v => String(v || '').replace(/\D/g, ''));
+                return tels.some(t => t.includes(digits));
+            }
+            return false;
         });
     }
 
-    renderFilteredAthletes(filtered);
+    renderFilteredAthletes(list);
 }
 
 function renderAthletesTable() {
@@ -291,210 +676,198 @@ function renderAthletesTable() {
     applyFilters();
 }
 
-function renderFilteredAthletes(athletesList) {
-    const tbody = document.getElementById('athletesTableBody');
-    document.getElementById('totalAtletas').textContent = athletesList.length;
+function athleteAvatarHTML(a, size) {
+    if (a.foto) {
+        return `<img src="${a.foto}" class="athlete-avatar" alt="${esc(a.nome)}" title="Ver foto" onclick="openPhotoNewTab('${esc(a.id)}')">`;
+    }
+    return `<div class="athlete-avatar-fallback">${esc((a.nome || '?').charAt(0).toUpperCase())}</div>`;
+}
 
-    if (athletesList.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="7" class="empty-msg">Nenhum atleta encontrado com os filtros selecionados.</td></tr>`;
-        let containerCardsDiv = document.getElementById('dynamicTurmasCardsContainer');
-        if (containerCardsDiv) containerCardsDiv.innerHTML = '';
+function buildAthleteRows(list) {
+    list.sort((a, b) => (a.nome || '').localeCompare(b.nome || '', 'pt-BR'));
+
+    return list.map(a => {
+        const resp = a.responsavel && a.responsavel !== '-' ? esc(a.responsavel) : '<span style="color:var(--text-mute)">Não inf.</span>';
+        const telNum = fmtPhone(a.telefone) || fmtPhone(a.telefoneAtleta);
+        const telRaw = (a.telefone && a.telefone !== '-') ? a.telefone : a.telefoneAtleta;
+        const telClean = telRaw && telRaw !== '-' ? String(telRaw).replace(/\D/g, '') : '';
+        const tel = telClean
+            ? `<a class="wa-link" href="https://wa.me/${telClean.length <= 11 ? '55' + telClean : telClean}" target="_blank" rel="noopener">📱 ${esc(telNum)}</a>`
+            : '<span style="color:var(--text-mute)">Sem telefone</span>';
+
+        return `
+        <tr>
+            <td class="cell-photo" data-label="Foto">${athleteAvatarHTML(a)}</td>
+            <td class="cell-main" data-label="Atleta">
+                <div class="mobile-athlete-head">
+                    <span class="only-mobile">${athleteAvatarHTML(a)}</span>
+                    <span>
+                        <strong>${esc(a.nome)}</strong>
+                        ${a.apelido ? `<br><small style="color:var(--text-dim)">"${esc(a.apelido)}"</small>` : ''}
+                    </span>
+                </div>
+            </td>
+            <td data-label="Nascimento">${fmtDate(a.dataNasc)}</td>
+            <td data-label="Turma"><span class="turma-badge">${esc(a.turma)}</span></td>
+            <td data-label="Indicação">${esc(a.indicacao || '-')}</td>
+            <td data-label="Responsável">${resp}<br><small style="font-weight:700;">${tel}</small></td>
+            <td class="actions-cell" data-label="">
+                <button class="btn-action btn-view" onclick="viewAthlete('${esc(a.id)}')">Ver</button>
+                <button class="btn-action btn-edit" onclick="editAthlete('${esc(a.id)}')">Editar</button>
+                <button class="btn-action btn-delete" onclick="deleteAthlete('${esc(a.id)}')">Excluir</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+function renderFilteredAthletes(list) {
+    const container = $('athletesGroups');
+    $('totalAtletas').textContent = list.length;
+
+    if (!list.length) {
+        container.innerHTML = '<p class="empty-msg">Nenhum atleta encontrado com os filtros selecionados.</p>';
         return;
     }
 
-    const turmasDefinidas = [
-        "Segunda e Quarta - 18:30 às 19:30",
-        "Segunda e Quarta - 19:40 às 20:40",
-        "Terça e Quinta - 18:30 às 19:30"
-    ];
+    const head = `
+        <thead>
+            <tr>
+                <th style="width:56px;">Foto</th>
+                <th>Nome / Apelido</th>
+                <th style="width:110px;">Nascimento</th>
+                <th>Turma</th>
+                <th>Indicação</th>
+                <th>Responsável / Tel</th>
+                <th style="width:190px;">Ações</th>
+            </tr>
+        </thead>`;
 
-    let cardsHtml = '';
+    const group = (title, arr) => `
+        <div class="turma-group">
+            <div class="turma-group-head">
+                <h4>⚽ ${esc(title)}</h4>
+                <span class="badge-count">${arr.length} atleta(s)</span>
+            </div>
+            <div class="table-responsive">
+                <table>${head}<tbody>${buildAthleteRows(arr)}</tbody></table>
+            </div>
+        </div>`;
 
-    const buildTableRows = (atletasTurma) => {
-        atletasTurma.sort((a, b) => a.nome.localeCompare(b.nome));
-        return atletasTurma.map(athlete => {
-            const photoHtml = athlete.foto 
-                ? `<img src="${athlete.foto}" class="athlete-avatar" alt="${athlete.nome}" title="Clique para ver a foto" onclick="openPhotoNewTab('${athlete.foto}')">`
-                : `<div class="athlete-avatar" style="display:flex; align-items:center; justify-content:center; background:#333; font-weight:bold;">${athlete.nome.charAt(0).toUpperCase()}</div>`;
-
-            const dataFormatada = athlete.dataNasc ? athlete.dataNasc.split('-').reverse().join('/') : '-';
-
-            return `
-                <tr>
-                    <td>${photoHtml}</td>
-                    <td>
-                        <strong>${athlete.nome}</strong>
-                        ${athlete.apelido ? '<br><small style="color:#aaa">Apelido: ' + athlete.apelido + '</small>' : ''}
-                    </td>
-                    <td>${dataFormatada}</td>
-                    <td><span style="background:#2a2a2a; padding:4px 8px; border-radius:4px; font-size:0.85rem;">${athlete.turma}</span></td>
-                    <td><small style="color:#ddd;">${athlete.indicacao || '-'}</small></td>
-                    <td>
-                        ${athlete.responsavel !== '-' ? athlete.responsavel : '<span style="color:#777;">Não inf.</span>'}<br>
-                        <small style="color:#84cc16; font-weight:bold;">Resp: ${athlete.telefone !== '-' ? athlete.telefone : 'Não inf.'}</small>
-                    </td>
-                    <td>
-                        <button class="btn-action btn-view" onclick="viewAthlete('${athlete.id}')">Ver</button>
-                        <button class="btn-action btn-edit" onclick="editAthlete('${athlete.id}')">Editar</button>
-                        <button class="btn-action btn-delete" onclick="deleteAthlete('${athlete.id}')">Excluir</button>
-                    </td>
-                </tr>
-            `;
-        }).join('');
-    };
-
-    turmasDefinidas.forEach(nomeTurma => {
-        const atletasDaTurma = athletesList.filter(a => a.turma === nomeTurma);
-        if (atletasDaTurma.length > 0) {
-            cardsHtml += `
-                <div style="background: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 8px; margin-bottom: 20px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.5);">
-                    <div style="background: #181818; padding: 12px 16px; border-bottom: 1px solid #2a2a2a; display: flex; justify-content: space-between; align-items: center;">
-                        <h3 style="margin: 0; color: #84cc16; font-size: 1rem;">⚽ Turma: ${nomeTurma}</h3>
-                        <span style="background: #2a2a2a; color: #f8fafc; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: bold;">${atletasDaTurma.length} atleta(s)</span>
-                    </div>
-                    <div style="overflow-x: auto;">
-                        <table style="width: 100%; border-collapse: collapse; text-align: left;">
-                            <thead>
-                                <tr style="border-bottom: 1px solid #2a2a2a; color: #aaa; font-size: 0.8rem;">
-                                    <th style="padding: 10px;">Foto</th>
-                                    <th style="padding: 10px;">Nome / Apelido</th>
-                                    <th style="padding: 10px;">Data Nasc.</th>
-                                    <th style="padding: 10px;">Turma</th>
-                                    <th style="padding: 10px;">Indicação</th>
-                                    <th style="padding: 10px;">Responsável / Tel</th>
-                                    <th style="padding: 10px;">Ações</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                ${buildTableRows(atletasDaTurma)}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            `;
-        }
+    let html = '';
+    TURMAS.forEach(t => {
+        const arr = list.filter(a => a.turma === t);
+        if (arr.length) html += group(t, arr);
     });
 
-    const outrasTurmasAtletas = athletesList.filter(a => !turmasDefinidas.includes(a.turma));
-    if (outrasTurmasAtletas.length > 0) {
-        cardsHtml += `
-            <div style="background: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 8px; margin-bottom: 20px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.5);">
-                <div style="background: #181818; padding: 12px 16px; border-bottom: 1px solid #2a2a2a; display: flex; justify-content: space-between; align-items: center;">
-                    <h3 style="margin: 0; color: #84cc16; font-size: 1rem;">⚽ Outras Turmas</h3>
-                    <span style="background: #2a2a2a; color: #f8fafc; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: bold;">${outrasTurmasAtletas.length} atleta(s)</span>
-                </div>
-                <div style="overflow-x: auto;">
-                    <table style="width: 100%; border-collapse: collapse; text-align: left;">
-                        <thead>
-                            <tr style="border-bottom: 1px solid #2a2a2a; color: #aaa; font-size: 0.8rem;">
-                                <th style="padding: 10px;">Foto</th>
-                                <th style="padding: 10px;">Nome / Apelido</th>
-                                <th style="padding: 10px;">Data Nasc.</th>
-                                <th style="padding: 10px;">Turma</th>
-                                <th style="padding: 10px;">Indicação</th>
-                                <th style="padding: 10px;">Responsável / Tel</th>
-                                <th style="padding: 10px;">Ações</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${buildTableRows(outrasTurmasAtletas)}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        `;
-    }
+    const outros = list.filter(a => !TURMAS.includes(a.turma));
+    if (outros.length) html += group('Outras Turmas', outros);
 
-    const tableWrapper = tbody.closest('.table-container') || tbody.parentNode.parentNode;
-    let containerCardsDiv = document.getElementById('dynamicTurmasCardsContainer');
-    if (!containerCardsDiv) {
-        containerCardsDiv = document.createElement('div');
-        containerCardsDiv.id = 'dynamicTurmasCardsContainer';
-        tableWrapper.parentNode.insertBefore(containerCardsDiv, tableWrapper);
-    }
-    
-    containerCardsDiv.innerHTML = cardsHtml;
-    tableWrapper.style.display = 'none';
+    container.innerHTML = html;
+}
+
+/* --------------------------------------------------------------------------
+   7. DETALHES DO ATLETA
+   -------------------------------------------------------------------------- */
+function athleteStats(a) {
+    const id = String(a.id);
+    const esteve = (h) => presentIdSet(h).has(id);
+
+    // Aulas da turma atual + qualquer aula (de outra turma) em que ele foi
+    // marcado presente — cobre atletas que trocaram de horário.
+    const aulasTurma = globalAttendance.filter(h => h.turma === a.turma || esteve(h));
+    const totalGeral = aulasTurma.length;
+    const presencas = aulasTurma.filter(esteve).length;
+
+    // Considera as aulas a partir do cadastro. Se o cadastro for posterior a
+    // aulas em que o atleta já apareceu (base importada), usa a data da 1ª presença.
+    let corte = a.dataCadastro || '';
+    const primeiraPresenca = aulasTurma.filter(esteve).map(h => h.data).sort()[0];
+    if (primeiraPresenca && (!corte || primeiraPresenca < corte)) corte = primeiraPresenca;
+
+    const aulasPos = aulasTurma.filter(h => !corte || h.data >= corte);
+    const totalPos = aulasPos.length;
+    const presencasPos = aulasPos.filter(esteve).length;
+    const faltasPos = Math.max(0, totalPos - presencasPos);
+
+    return {
+        totalGeral, totalPos, presencas, presencasPos, faltasPos, corte,
+        pctPos: totalPos > 0 ? Math.round((presencasPos / totalPos) * 100) : null,
+        pctGeral: totalGeral > 0 ? Math.round((presencas / totalGeral) * 100) : null
+    };
+}
+
+function pctText(p) { return p === null ? '—' : p + '%'; }
+
+function waLink(num) {
+    const clean = num && num !== '-' ? String(num).replace(/\D/g, '') : '';
+    if (!clean) return 'Não informado';
+    const full = clean.length <= 11 ? '55' + clean : clean;
+    return `<a class="wa-link" href="https://wa.me/${full}" target="_blank" rel="noopener">📱 ${esc(fmtPhone(num))}</a>`;
 }
 
 function viewAthlete(id) {
-    const athlete = globalAthletes.find(a => a.id === id);
-    if (!athlete) return;
+    const a = globalAthletes.find(x => String(x.id) === String(id));
+    if (!a) return;
+    const s = athleteStats(a);
 
-    const todasAulasTurma = globalAttendance.filter(h => h.turma === athlete.turma);
-    const totalAulasGeral = todasAulasTurma.length;
+    const photo = a.foto
+        ? `<img src="${a.foto}" style="max-width:130px;max-height:130px;border-radius:12px;margin:0 auto 14px;border:2px solid var(--brand);cursor:pointer;" onclick="openPhotoNewTab('${esc(a.id)}')">`
+        : `<div class="athlete-avatar-fallback" style="width:76px;height:76px;font-size:1.9rem;margin:0 auto 14px;">${esc((a.nome || '?').charAt(0))}</div>`;
 
-    const aulasPosCadastro = todasAulasTurma.filter(h => !athlete.dataCadastro || h.data >= athlete.dataCadastro);
-    const totalAulasPos = aulasPosCadastro.length;
-
-    const presencas = todasAulasTurma.filter(h => h.presentes && h.presentes.includes(athlete.nome)).length;
-    
-    const faltasPos = totalAulasPos - presencas;
-    const taxaPos = totalAulasPos > 0 ? Math.round((presencas / totalAulasPos) * 100) : 0;
-    const taxaGeral = totalAulasGeral > 0 ? Math.round((presencas / totalAulasGeral) * 100) : 0;
-
-    const modalDetails = document.getElementById('modalDetails');
-    const photoHtml = athlete.foto 
-        ? `<img src="${athlete.foto}" style="max-width:120px; max-height:120px; border-radius:8px; margin-bottom:15px; border:2px solid #84cc16; cursor:pointer;" title="Clique para abrir em nova aba" onclick="openPhotoNewTab('${athlete.foto}')">`
-        : `<div class="athlete-avatar" style="width:70px; height:70px; font-size:1.8rem; margin:0 auto 15px; display:flex; align-items:center; justify-content:center; background:#333;">${athlete.nome.charAt(0)}</div>`;
-
-    const dataFormatada = athlete.dataNasc ? athlete.dataNasc.split('-').reverse().join('/') : '-';
-    const dataCadFormatada = athlete.dataCadastro ? athlete.dataCadastro.split('-').reverse().join('/') : '-';
-
-    const foneAtletaClean = athlete.telefoneAtleta && athlete.telefoneAtleta !== '-' ? athlete.telefoneAtleta.replace(/\D/g, '') : '';
-    const foneAtletaHtml = foneAtletaClean 
-        ? `<a href="https://wa.me/55${foneAtletaClean}" target="_blank" style="color:#84cc16; text-decoration:none; font-weight:bold;">📱 ${athlete.telefoneAtleta}</a>` 
-        : 'Não informado';
-
-    const foneRespClean = athlete.telefone && athlete.telefone !== '-' ? athlete.telefone.replace(/\D/g, '') : '';
-    const foneRespHtml = foneRespClean 
-        ? `<a href="https://wa.me/55${foneRespClean}" target="_blank" style="color:#84cc16; text-decoration:none; font-weight:bold;">📱 ${athlete.telefone}</a>` 
-        : (athlete.telefone !== '-' ? athlete.telefone : 'Não informado');
-
-    modalDetails.innerHTML = `
-        <div style="text-align: center;">
-            ${photoHtml}
-            <h2 style="color:#fff; margin-bottom:5px;">${athlete.nome}</h2>
-            <p style="color:#aaa; margin-bottom:15px;">"${athlete.apelido}"</p>
+    $('modalDetails').innerHTML = `
+        <div style="text-align:center;">
+            ${photo}
+            <h2 style="margin-bottom:2px;">${esc(a.nome)}</h2>
+            <p style="color:var(--text-dim);margin-bottom:14px;">"${esc(a.apelido || '')}"</p>
         </div>
-        <hr style="border:0; border-top:1px solid #333; margin:15px 0;">
-        <p style="margin-bottom:8px;"><strong>Turma:</strong> ${athlete.turma}</p>
-        <p style="margin-bottom:8px;"><strong>Data de Nascimento:</strong> ${dataFormatada}</p>
-        <p style="margin-bottom:8px;"><strong>Data de Cadastro:</strong> ${dataCadFormatada}</p>
-        <p style="margin-bottom:8px;"><strong>Indicação:</strong> ${athlete.indicacao || '-'}</p>
-        <p style="margin-bottom:8px;"><strong>WhatsApp do Atleta:</strong> ${foneAtletaHtml}</p>
-        <hr style="border:0; border-top:1px dashed #333; margin:10px 0;">
-        <p style="margin-bottom:8px;"><strong>Responsável:</strong> ${athlete.responsavel !== '-' ? athlete.responsavel : 'Não informado'}</p>
-        <p style="margin-bottom:8px;"><strong>WhatsApp do Responsável:</strong> ${foneRespHtml}</p>
-        <hr style="border:0; border-top:1px solid #333; margin:15px 0;">
-        <h4 style="margin-bottom:8px; color:#84cc16;">Resumo de Frequência</h4>
-        <p style="margin-bottom:4px;"><strong>Aulas Totais da Turma:</strong> ${totalAulasGeral}</p>
-        <p style="margin-bottom:4px;"><strong>Aulas após Cadastro:</strong> ${totalAulasPos}</p>
-        <p style="margin-bottom:4px; color:#84cc16;"><strong>Presenças:</strong> ${presencas}</p>
-        <p style="margin-bottom:4px; color:#ef4444;"><strong>Faltas (pós-cadastro):</strong> ${faltasPos}</p>
-        <p style="margin-bottom:4px;"><strong>Assiduidade (Pós-Cadastro):</strong> ${taxaPos}%</p>
-        <p style="margin-bottom:8px;"><strong>Assiduidade (Geral):</strong> ${taxaGeral}%</p>
-    `;
+        <div class="detail-row"><span>Turma</span><span>${esc(a.turma)}</span></div>
+        <div class="detail-row"><span>Nascimento</span><span>${fmtDate(a.dataNasc)}</span></div>
+        <div class="detail-row"><span>Cadastro</span><span>${fmtDate(a.dataCadastro)}</span></div>
+        ${a.Documento ? `<div class="detail-row"><span>Documento</span><span>${esc(a.Documento)}</span></div>` : ''}
+        <div class="detail-row"><span>Indicação</span><span>${esc(a.indicacao || '-')}</span></div>
+        <div class="detail-row"><span>WhatsApp do atleta</span><span>${waLink(a.telefoneAtleta)}</span></div>
+        <div class="detail-row"><span>Responsável</span><span>${a.responsavel && a.responsavel !== '-' ? esc(a.responsavel) : 'Não informado'}</span></div>
+        <div class="detail-row"><span>WhatsApp do responsável</span><span>${waLink(a.telefone)}</span></div>
 
-    document.getElementById('modal').classList.remove('hidden');
+        <h4 style="margin:18px 0 6px;color:var(--brand);">Resumo de Frequência</h4>
+        <div class="stat-grid">
+            <div class="stat-box"><div class="v" style="color:var(--brand)">${s.presencas}</div><div class="l">Presenças</div></div>
+            <div class="stat-box"><div class="v" style="color:var(--danger)">${s.faltasPos}</div><div class="l">Faltas</div></div>
+            <div class="stat-box"><div class="v">${pctText(s.pctPos)}</div><div class="l">Pós-cadastro</div></div>
+            <div class="stat-box"><div class="v" style="color:var(--text-dim)">${pctText(s.pctGeral)}</div><div class="l">Geral</div></div>
+        </div>
+        <p style="color:var(--text-mute);font-size:.78rem;margin-top:10px;">
+            Aulas da turma: ${s.totalGeral} • Após o cadastro: ${s.totalPos}
+        </p>
+        <div class="form-buttons">
+            <button class="btn-action btn-edit" style="flex:1;min-height:44px;" onclick="editAthlete('${esc(a.id)}')">Editar</button>
+            <button class="btn-action btn-view" style="flex:1;min-height:44px;" onclick="viewAthleteDates('${esc(a.id)}')">Ver presenças</button>
+        </div>
+    `;
+    openModal();
+}
+
+function openModal() {
+    $('modal').classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
 }
 
 function closeModal() {
-    document.getElementById('modal').classList.add('hidden');
+    $('modal').classList.add('hidden');
+    document.body.style.overflow = '';
 }
 
-// --- SCRIPT EMBUTIDO DE CONVERSÃO EM PDF VIA HTML2PDF ---
-
+/* --------------------------------------------------------------------------
+   8. RELATÓRIOS EM NOVA ABA (PDF / impressão)
+   -------------------------------------------------------------------------- */
 function getPDFScriptTag() {
     return `
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"><\/script>
         <script>
             async function sharePagePDF(filename, orientation) {
                 const btnBox = document.getElementById('no-print-area');
                 if (btnBox) btnBox.style.display = 'none';
-
                 const element = document.getElementById('pdf-content-area') || document.body;
-
                 const opt = {
                     margin: [8, 8, 8, 8],
                     filename: filename,
@@ -502,775 +875,562 @@ function getPDFScriptTag() {
                     html2canvas: { scale: 2, useCORS: true, logging: false },
                     jsPDF: { unit: 'mm', format: 'a4', orientation: orientation }
                 };
-
                 try {
-                    html2pdf().set(opt).from(element).save().then(() => {
+                    html2pdf().set(opt).from(element).save().then(function () {
                         if (btnBox) btnBox.style.display = 'flex';
                     });
-
                 } catch (err) {
-                    console.error('Erro ao gerar PDF:', err);
                     if (btnBox) btnBox.style.display = 'flex';
-                    alert('Não foi possível gerar o PDF. Tente usar o botão de Imprimir/Salvar.');
+                    alert('Não foi possível gerar o PDF. Use o botão Imprimir.');
                 }
             }
-        </script>
-    `;
+        <\/script>`;
+}
+
+/** Estilos comuns dos relatórios — já responsivos para leitura no celular. */
+function reportBaseCSS(orientation, fontSize) {
+    return `
+        @page { size: A4 ${orientation}; margin: 8mm; }
+        * { box-sizing: border-box; }
+        body { font-family: Arial, Helvetica, sans-serif; color:#111; padding:12px; line-height:1.3;
+               font-size:${fontSize}; background:#fff; -webkit-text-size-adjust:100%; }
+        #no-print-area { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px; background:#f1f5f9;
+                         padding:10px; border-radius:8px; border:1px solid #cbd5e1;
+                         position:sticky; top:0; z-index:10; }
+        #no-print-area button { flex:1 1 200px; min-height:46px; border:none; border-radius:6px;
+                                cursor:pointer; font-size:.9rem; font-weight:bold; }
+        .btn-print { background:#84cc16; color:#000; }
+        .btn-share-pdf { background:#25d366; color:#fff; }
+        table { width:100%; border-collapse:collapse; }
+        th, td { border:1px solid #e5e7eb; padding:5px 7px; text-align:left; word-break:break-word; }
+        th { background:#f4f9eb; color:#2e5300; font-weight:bold; }
+        tr:nth-child(even) td { background:#fafafa; }
+        .turma-card { border:1px solid #ccc; border-top:3px solid #84cc16; border-radius:4px;
+                      margin-bottom:12px; overflow:hidden; page-break-inside:avoid; }
+        .turma-header { background:#f8fafb; color:#2e5300; padding:6px 10px; font-weight:bold;
+                        font-size:.85rem; border-bottom:1px solid #e5e7eb; }
+        .total-box { margin-top:12px; font-weight:bold; text-align:right; color:#4d7c0f;
+                     border-top:2px solid #84cc16; padding-top:8px; }
+        @media (max-width: 700px) {
+            body { padding:8px; font-size:.82rem; }
+            table, thead, tbody, tr, td, th { display:block; width:100%; }
+            thead { display:none; }
+            tbody tr { border:1px solid #ddd; border-radius:6px; margin-bottom:8px; padding:6px 8px; }
+            td { border:none; border-bottom:1px dashed #eee; display:flex; justify-content:space-between;
+                 gap:10px; text-align:right; padding:5px 0; }
+            td:last-child { border-bottom:none; }
+            td::before { content:attr(data-label); font-weight:bold; color:#4d7c0f; text-align:left; }
+            tr:nth-child(even) td { background:transparent; }
+            .cols-2 { grid-template-columns:1fr !important; }
+        }
+        @media print { #no-print-area { display:none !important; } body { padding:0; } }`;
 }
 
 function generatePrintHeader() {
+    const now = new Date();
     return `
-        <div style="display:flex; align-items:center; justify-content:space-between; border-bottom:2px solid #84cc16; padding-bottom:8px; margin-bottom:12px;">
-            <div style="display:flex; align-items:center; gap:10px;">
-                <img src="Logo academy.jpg" alt="Logo Prosol Academy" style="max-height:45px; width:auto;" onerror="this.style.display='none'"/>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;
+                    border-bottom:2px solid #84cc16;padding-bottom:8px;margin-bottom:12px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+                <img src="assets/logo.jpg" alt="" style="max-height:46px;width:auto;" onerror="this.style.display='none'"/>
                 <div>
-                    <h1 style="margin:0; font-size:1.2rem; color:#4d7c0f; font-family:sans-serif;">PROSOL ACADEMY</h1>
-                    <p style="margin:1px 0 0; color:#555; font-size:0.75rem; font-family:sans-serif;">Sistema de Gestão Esportiva</p>
+                    <h1 style="margin:0;font-size:1.15rem;color:#4d7c0f;">PROSOL ACADEMY</h1>
+                    <p style="margin:1px 0 0;color:#555;font-size:.72rem;">Sistema de Gestão Esportiva</p>
                 </div>
             </div>
-            <div style="text-align:right; font-size:0.7rem; color:#666; font-family:sans-serif;">
-                Emissão: ${new Date().toLocaleDateString('pt-BR')} ${new Date().toLocaleTimeString('pt-BR')}
+            <div style="text-align:right;font-size:.7rem;color:#666;">
+                Emissão: ${now.toLocaleDateString('pt-BR')} ${now.toLocaleTimeString('pt-BR')}
             </div>
-        </div>
-    `;
+        </div>`;
 }
 
-// --- GERADOR DO HTML DO RELATÓRIO DE ATLETAS (NA ABA GERADA) ---
+function openReportTab(html, emptyMsg) {
+    if (!html) { toast(emptyMsg || 'Nada para exibir.', 'warn'); return; }
+    const w = window.open('', '_blank');
+    if (!w) { toast('Permita pop-ups no navegador para abrir o relatório.', 'error'); return; }
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+}
 
+function reportShell(title, orientation, fontSize, filename, body) {
+    return `<!DOCTYPE html><html lang="pt-br"><head><meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>${esc(title)}</title>
+        <style>${reportBaseCSS(orientation, fontSize)}</style>
+        ${getPDFScriptTag()}
+        </head><body>
+        <div id="no-print-area">
+            <button class="btn-share-pdf" onclick="sharePagePDF('${filename}','${orientation}')">📥 Baixar em PDF</button>
+            <button class="btn-print" onclick="window.print()">🖨️ Imprimir / Compartilhar</button>
+        </div>
+        <div id="pdf-content-area">${generatePrintHeader()}${body}</div>
+        </body></html>`;
+}
+
+/* ---------- 8.1 Relatório de atletas ---------- */
 function buildAthletesReportHTML() {
-    const incApelido = document.getElementById('rep_apelido').checked;
-    const incDataNasc = document.getElementById('rep_dataNasc').checked;
-    const incTurma = document.getElementById('rep_turma').checked;
-    const incTelAtleta = document.getElementById('rep_telAtleta').checked;
-    const incResponsavel = document.getElementById('rep_responsavel').checked;
-    const incTelefone = document.getElementById('rep_telefone').checked;
-    const incIndicacao = document.getElementById('rep_indicacao').checked;
-
-    let list = [...globalAthletes];
-    if (list.length === 0) return null;
-
-    const optionalFieldsCount = [incApelido, incDataNasc, incTurma, incTelAtleta, incResponsavel, incTelefone, incIndicacao].filter(Boolean).length;
-    const isPortrait = optionalFieldsCount <= 4;
-    const pageOrientation = isPortrait ? 'portrait' : 'landscape';
-
-    const turmasDefinidas = [
-        "Segunda e Quarta - 18:30 às 19:30",
-        "Segunda e Quarta - 19:40 às 20:40",
-        "Terça e Quinta - 18:30 às 19:30"
-    ];
-
-    let cardsHtml = '';
-
-    const renderTableForGroup = (atletasList, tituloGroup) => {
-        let tableHeaders = `<th>Nome Completo</th>`;
-        if (incApelido) tableHeaders += `<th>Apelido</th>`;
-        if (incDataNasc) tableHeaders += `<th>Data Nasc.</th>`;
-        if (incTurma) tableHeaders += `<th>Turma</th>`;
-        if (incTelAtleta) tableHeaders += `<th>Tel. Atleta</th>`;
-        if (incIndicacao) tableHeaders += `<th>Indicação</th>`;
-        if (incResponsavel) tableHeaders += `<th>Responsável</th>`;
-        if (incTelefone) tableHeaders += `<th>Tel. Responsável</th>`;
-
-        let tableRows = '';
-        atletasList.forEach(a => {
-            const dtFmt = a.dataNasc ? a.dataNasc.split('-').reverse().join('/') : '-';
-            tableRows += `<tr>`;
-            tableRows += `<td><strong>${a.nome}</strong></td>`;
-            if (incApelido) tableRows += `<td>${a.apelido || '-'}</td>`;
-            if (incDataNasc) tableRows += `<td>${dtFmt}</td>`;
-            if (incTurma) tableRows += `<td>${a.turma}</td>`;
-            if (incTelAtleta) tableRows += `<td>${a.telefoneAtleta || '-'}</td>`;
-            if (incIndicacao) tableRows += `<td>${a.indicacao || '-'}</td>`;
-            if (incResponsavel) tableRows += `<td>${a.responsavel || '-'}</td>`;
-            if (incTelefone) tableRows += `<td>${a.telefone || '-'}</td>`;
-            tableRows += `</tr>`;
-        });
-
-        return `
-            <div class="turma-card">
-                <div class="turma-header">
-                    ⚽ Turma: ${tituloGroup} (${atletasList.length} atletas)
-                </div>
-                <div style="padding: 4px 6px;">
-                    <table class="${isPortrait ? 'single-line-table' : ''}">
-                        <thead>
-                            <tr>${tableHeaders}</tr>
-                        </thead>
-                        <tbody>
-                            ${tableRows}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        `;
+    const chk = (id) => ($(id) ? $(id).checked : false);
+    const inc = {
+        apelido: chk('rep_apelido'),
+        dataNasc: chk('rep_dataNasc'),
+        turma: chk('rep_turma'),
+        telAtleta: chk('rep_telAtleta'),
+        responsavel: chk('rep_responsavel'),
+        telefone: chk('rep_telefone'),
+        indicacao: chk('rep_indicacao'),
+        documento: chk('rep_documento')
     };
 
-    turmasDefinidas.forEach(nomeTurma => {
-        const atletasDaTurma = list
-            .filter(a => a.turma === nomeTurma)
-            .sort((a, b) => a.nome.localeCompare(b.nome));
+    const list = [...globalAthletes];
+    if (!list.length) return null;
 
-        if (atletasDaTurma.length > 0) {
-            cardsHtml += renderTableForGroup(atletasDaTurma, nomeTurma);
-        }
+    const count = Object.values(inc).filter(Boolean).length;
+    const orientation = count <= 4 ? 'portrait' : 'landscape';
+
+    const cols = [{ k: 'nome', label: 'Nome Completo' }];
+    if (inc.apelido) cols.push({ k: 'apelido', label: 'Apelido' });
+    if (inc.dataNasc) cols.push({ k: 'dataNasc', label: 'Data Nasc.', fmt: fmtDate });
+    if (inc.turma) cols.push({ k: 'turma', label: 'Turma' });
+    if (inc.documento) cols.push({ k: 'Documento', label: 'Documento' });
+    if (inc.telAtleta) cols.push({ k: 'telefoneAtleta', label: 'Tel. Atleta', fmt: fmtPhone });
+    if (inc.indicacao) cols.push({ k: 'indicacao', label: 'Indicação' });
+    if (inc.responsavel) cols.push({ k: 'responsavel', label: 'Responsável' });
+    if (inc.telefone) cols.push({ k: 'telefone', label: 'Tel. Responsável', fmt: fmtPhone });
+
+    const groupTable = (arr, title) => `
+        <div class="turma-card">
+            <div class="turma-header">⚽ Turma: ${esc(title)} (${arr.length} atletas)</div>
+            <table>
+                <thead><tr>${cols.map(c => `<th>${c.label}</th>`).join('')}</tr></thead>
+                <tbody>${arr.map(a => `<tr>${cols.map(c => {
+                    let v = c.fmt ? c.fmt(a[c.k]) : a[c.k];
+                    if (v === null || v === undefined || v === '' || v === '-') v = '-';
+                    return `<td data-label="${c.label}">${c.k === 'nome' ? '<strong>' + esc(v) + '</strong>' : esc(v)}</td>`;
+                }).join('')}</tr>`).join('')}</tbody>
+            </table>
+        </div>`;
+
+    let cards = '';
+    TURMAS.forEach(t => {
+        const arr = list.filter(a => a.turma === t).sort((a, b) => (a.nome || '').localeCompare(b.nome || '', 'pt-BR'));
+        if (arr.length) cards += groupTable(arr, t);
     });
+    const outros = list.filter(a => !TURMAS.includes(a.turma));
+    if (outros.length) cards += groupTable(outros, 'Outras Turmas');
 
-    const outrosAtletas = list.filter(a => !turmasDefinidas.includes(a.turma));
-    if (outrosAtletas.length > 0) {
-        cardsHtml += renderTableForGroup(outrosAtletas, "Outras Turmas");
-    }
+    const body = `
+        <h2 style="margin:0 0 10px;font-size:1rem;color:#333;">📋 Relatório Geral de Atletas Cadastrados</h2>
+        ${cards}
+        <div class="total-box">Total: ${list.length} atletas</div>`;
 
-    const styleRules = `
-        @page {
-            size: A4 ${pageOrientation};
-            margin: 8mm;
-        }
-        body { 
-            font-family: Arial, sans-serif; 
-            color: #111; 
-            padding: 10px; 
-            line-height: 1.15;
-            font-size: ${isPortrait ? '0.72rem' : '0.75rem'}; 
-            background: #fff;
-        }
-        #no-print-area {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 15px;
-            background: #f1f5f9;
-            padding: 10px;
-            border-radius: 6px;
-            border: 1px solid #cbd5e1;
-        }
-        .btn-print {
-            background-color: #84cc16;
-            color: #000;
-            font-weight: bold;
-            border: none;
-            padding: 10px 16px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 0.85rem;
-        }
-        .btn-share-pdf {
-            background-color: #25d366;
-            color: #fff;
-            font-weight: bold;
-            border: none;
-            padding: 10px 16px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 0.85rem;
-        }
-        .turma-card {
-            border: 1px solid #ccc;
-            border-top: 3px solid #84cc16;
-            border-radius: 4px;
-            margin-bottom: 12px;
-            overflow: hidden;
-            background: #fff;
-            page-break-inside: avoid;
-        }
-        .turma-header {
-            background-color: #f8fafb;
-            color: #2e5300;
-            padding: 5px 10px;
-            font-weight: bold;
-            font-size: 0.82rem;
-            border-bottom: 1px solid #e5e7eb;
-        }
-        table { 
-            width: 100%; 
-            border-collapse: collapse; 
-            table-layout: fixed; /* AQUI FOI ALTERADO DE 'auto' PARA 'fixed' */
-        }
-        th, td { 
-            border: 1px solid #e5e7eb; 
-            padding: ${isPortrait ? '3px 5px' : '4px 6px'}; 
-            font-size: ${isPortrait ? '0.7rem' : '0.75rem'}; 
-            text-align: left; 
-        }
-        th { 
-            background-color: #f4f9eb;
-            color: #2e5300; 
-            font-weight: bold; 
-        }
-        tr:nth-child(even) { 
-            background-color: #fafafa; 
-        }
-        .single-line-table td, .single-line-table th {
-            white-space: nowrap !important;
-            overflow: hidden !important;
-            text-overflow: ellipsis !important;
-            max-width: 180px;
-        }
-        .total-box { 
-            margin-top: 10px; 
-            font-size: 0.9rem; 
-            font-weight: bold; 
-            text-align: right; 
-            color: #4d7c0f; 
-            border-top: 2px solid #84cc16; 
-            padding-top: 6px; 
-        }
-        @media print {
-            #no-print-area { display: none !important; }
-            body { padding: 0; }
-        }
-    `;
-
-    return `
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Relatório de Atletas - Prosol Academy</title>
-            <style>${styleRules}</style>
-            ${getPDFScriptTag()}
-        </head>
-        <body>
-            <div id="no-print-area">
-                <button class="btn-share-pdf" onclick="sharePagePDF('Relatorio_Atletas_Prosol.pdf', '${pageOrientation}')">📥 BAIXAR ESTE RELATÓRIO EM PDF</button>
-                <button class="btn-print" onclick="window.print()">🖨️ Imprimir / Salvar PDF Nativo</button>
-            </div>
-
-            <div id="pdf-content-area">
-                ${generatePrintHeader()}
-                <h2 style="color:#333; margin-top:0; margin-bottom:8px; font-size:0.95rem;">
-                    📋 Relatório Geral de Atletas Cadastrados
-                </h2>
-                ${cardsHtml}
-                <div class="total-box">
-                    Total: ${list.length} atletas
-                </div>
-            </div>
-        </body>
-        </html>
-    `;
+    return reportShell('Relatório de Atletas - Prosol Academy', orientation,
+        orientation === 'portrait' ? '.74rem' : '.78rem', 'Relatorio_Atletas_Prosol.pdf', body);
 }
 
 function openAthletesReportTab() {
-    const htmlContent = buildAthletesReportHTML();
-    if (!htmlContent) {
-        alert('Nenhum atleta cadastrado para gerar relatório.');
-        return;
-    }
-
-    const printWin = window.open('', '_blank');
-    printWin.document.write(htmlContent);
-    printWin.document.close();
-    printWin.focus();
+    openReportTab(buildAthletesReportHTML(), 'Nenhum atleta cadastrado para gerar relatório.');
 }
 
-// --- CHAMADAS ---
+/* ---------- 8.2 Chamada individual ---------- */
+function attendanceLists(record) {
+    const ids = presentIdSet(record);
+    const isPresent = (a) => ids.has(String(a.id));
 
-function loadAttendanceList(selectedPresentes = null) {
-    const selectedTurma = document.getElementById('chamadaTurma').value;
-    const dataChamada = document.getElementById('chamadaData').value;
-    const checklist = document.getElementById('attendanceChecklist');
+    // Atletas da turma já cadastrados na data da aula.
+    const daTurma = globalAthletes.filter(a =>
+        a.turma === record.turma &&
+        (!a.dataCadastro || a.dataCadastro <= record.data)
+    );
+
+    // Quem foi marcado presente entra SEMPRE — mesmo que depois tenha mudado de
+    // turma ou tenha data de cadastro posterior (bases importadas).
+    const presentes = globalAthletes.filter(isPresent);
+    const idsPresentes = new Set(presentes.map(a => String(a.id)));
+    const ausentes = daTurma.filter(a => !idsPresentes.has(String(a.id)));
+
+    const ord = (x, y) => (x.nome || '').localeCompare(y.nome || '', 'pt-BR');
+    return { presentes: presentes.sort(ord), ausentes: ausentes.sort(ord) };
+}
+
+function buildSingleAttendanceHTML(recordId) {
+    const r = globalAttendance.find(x => String(x.id) === String(recordId));
+    if (!r) return null;
+    const { presentes, ausentes } = attendanceLists(r);
+    const li = (a, ok) => `<li style="padding:4px 0;border-bottom:1px dotted #eee;color:${ok ? '#15803d' : '#b91c1c'};font-weight:bold;">
+        ${ok ? '✔' : '✖'} ${esc(a.nome)} (${esc(a.apelido || '')}) - ${fmtDate(a.dataNasc)}</li>`;
+
+    const body = `
+        <div style="background:#f4f9eb;padding:10px 12px;border-radius:6px;border:1px solid #d9f99d;margin-bottom:12px;">
+            <p style="margin:0 0 3px;"><strong>Data da Aula:</strong> ${fmtDate(r.data)}</p>
+            <p style="margin:0 0 3px;"><strong>Turma:</strong> ${esc(r.turma)}</p>
+            <p style="margin:0;"><strong>Observações:</strong> ${esc(r.obs || 'Nenhuma observação informada.')}</p>
+        </div>
+        <h3 style="color:#4d7c0f;border-bottom:1px solid #ccc;padding-bottom:3px;font-size:.95rem;">Atletas Presentes (${presentes.length})</h3>
+        <ul style="list-style:none;padding:0;margin:4px 0 14px;">${presentes.length ? presentes.map(a => li(a, true)).join('') : '<li>Nenhum presente registrado.</li>'}</ul>
+        <h3 style="color:#4d7c0f;border-bottom:1px solid #ccc;padding-bottom:3px;font-size:.95rem;">Atletas Ausentes (${ausentes.length})</h3>
+        <ul style="list-style:none;padding:0;margin:4px 0;">${ausentes.length ? ausentes.map(a => li(a, false)).join('') : '<li>Nenhuma falta registrada.</li>'}</ul>`;
+
+    return reportShell(`Chamada ${fmtDate(r.data)} - Prosol Academy`, 'portrait', '.82rem',
+        `Chamada_Prosol_${r.data}.pdf`, body);
+}
+
+function openSingleAttendanceTab(recordId) {
+    openReportTab(buildSingleAttendanceHTML(recordId), 'Chamada não encontrada.');
+}
+
+/* ---------- 8.3 Chamadas filtradas ---------- */
+function buildFilteredAttendancesHTML() {
+    const records = getFilteredAttendances();
+    if (!records.length) return null;
+    records.sort((a, b) => String(b.data).localeCompare(String(a.data)));
+
+    const dtIni = $('filterDataInicio').value;
+    const dtFim = $('filterDataFim').value;
+    let periodo = 'Todas as chamadas cadastradas';
+    if (dtIni || dtFim) {
+        periodo = `Período de ${dtIni ? fmtDate(dtIni) : 'Início'} até ${dtFim ? fmtDate(dtFim) : 'Atual'}`;
+    }
+
+    const body = `
+        <p style="font-size:.92rem;font-weight:bold;margin-bottom:12px;color:#333;">
+            📋 ${esc(periodo)} (${records.length} registro(s))
+        </p>
+        ${records.map(r => {
+            const { presentes, ausentes } = attendanceLists(r);
+            const ul = (arr, ok) => arr.length
+                ? arr.map(a => `<li style="color:${ok ? '#15803d' : '#b91c1c'};">${ok ? '✔' : '✖'} ${esc(a.nome)} (${esc(a.apelido || '')})</li>`).join('')
+                : '<li style="color:#888;">Nenhum</li>';
+            return `
+            <div style="page-break-inside:avoid;border:1px solid #d9f99d;padding:10px;border-radius:6px;margin-bottom:12px;background:#fafdf5;">
+                <h2 style="margin:0 0 6px;color:#4d7c0f;font-size:.95rem;border-bottom:1px solid #e5e7eb;padding-bottom:3px;">
+                    📅 ${fmtDate(r.data)} — ${esc(r.turma)}
+                </h2>
+                <p style="margin:0 0 8px;font-size:.8rem;color:#444;"><strong>Observações:</strong> ${esc(r.obs || 'Nenhuma')}</p>
+                <div class="cols-2" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                    <div>
+                        <h4 style="margin:2px 0;color:#15803d;font-size:.82rem;">Presentes (${presentes.length})</h4>
+                        <ul style="padding-left:14px;margin:0;font-size:.76rem;">${ul(presentes, true)}</ul>
+                    </div>
+                    <div>
+                        <h4 style="margin:2px 0;color:#b91c1c;font-size:.82rem;">Ausentes (${ausentes.length})</h4>
+                        <ul style="padding-left:14px;margin:0;font-size:.76rem;">${ul(ausentes, false)}</ul>
+                    </div>
+                </div>
+            </div>`;
+        }).join('')}`;
+
+    return reportShell('Relatório de Chamadas - Prosol Academy', 'portrait', '.8rem',
+        'Relatorio_Chamadas_Prosol.pdf', body);
+}
+
+function openFilteredAttendancesTab() {
+    openReportTab(buildFilteredAttendancesHTML(), 'Nenhuma chamada encontrada no período.');
+}
+
+/* --------------------------------------------------------------------------
+   9. CHAMADAS
+   -------------------------------------------------------------------------- */
+function updateAttendanceCounter() {
+    const el = $('attendanceCounter');
+    if (!el) return;
+    const total = document.querySelectorAll('.athlete-checkbox').length;
+    if (!total) { el.textContent = ''; return; }
+    const marked = document.querySelectorAll('.athlete-checkbox:checked').length;
+    el.innerHTML = `<strong>${marked}</strong> / ${total} presentes`;
+}
+
+function markAll(state) {
+    document.querySelectorAll('.athlete-checkbox').forEach(cb => { cb.checked = state; });
+    updateAttendanceCounter();
+}
+
+function loadAttendanceList(selectedPresentes) {
+    const turma = $('chamadaTurma').value;
+    const data = $('chamadaData').value;
+    const checklist = $('attendanceChecklist');
     checklist.innerHTML = '';
 
-    if (!selectedTurma) {
+    if (!turma) {
         checklist.innerHTML = '<p class="empty-msg">Selecione uma turma acima para carregar a lista de atletas.</p>';
+        updateAttendanceCounter();
         return;
     }
 
-    const athletes = globalAthletes.filter(a => {
-        const pertenceTurma = a.turma === selectedTurma;
-        const cadastradoAteData = !a.dataCadastro || !dataChamada || a.dataCadastro <= dataChamada;
-        return pertenceTurma && cadastradoAteData;
-    });
+    // IDs dos que já estavam marcados (resolvidos por nome tolerante)
+    const salvosIds = Array.isArray(selectedPresentes)
+        ? presentIdSet({ presentes: selectedPresentes }) : new Set();
 
-    if (athletes.length === 0) {
+    let athletes = globalAthletes.filter(a =>
+        (a.turma === turma || salvosIds.has(String(a.id))) &&
+        (!a.dataCadastro || !data || a.dataCadastro <= data || salvosIds.has(String(a.id)))
+    );
+
+    // Salvaguarda: se o corte por data de cadastro esvaziar a lista (bases
+    // importadas com data de cadastro futura), mostra todos os da turma.
+    if (!athletes.length) athletes = globalAthletes.filter(a => a.turma === turma);
+
+    athletes.sort((a, b) => (a.nome || '').localeCompare(b.nome || '', 'pt-BR'));
+
+    if (!athletes.length) {
         checklist.innerHTML = '<p class="empty-msg">Nenhum atleta cadastrado nesta turma até a data selecionada.</p>';
+        updateAttendanceCounter();
         return;
     }
 
-    athletes.sort((a, b) => a.nome.localeCompare(b.nome));
-
-    // Se selectedPresentes for um array, significa que estamos editando. 
-    // Caso contrário (null), é uma nova chamada e todos começam marcados por padrão.
     const isEditing = Array.isArray(selectedPresentes);
-    const presentesSalvos = isEditing ? selectedPresentes.map(nome => nome.trim()) : [];
 
-    athletes.forEach(athlete => {
-        const item = document.createElement('div');
-        item.className = 'checklist-item';
-        
-        let isChecked = false;
-        if (isEditing) {
-            isChecked = presentesSalvos.includes(athlete.nome.trim());
-        } else {
-            isChecked = false; // Nova chamada: todos marcados por padrão
-        }
-
-        const checkedAttr = isChecked ? 'checked' : '';
-        const dataNascFormat = athlete.dataNasc ? athlete.dataNasc.split('-').reverse().join('/') : '-';
-        
-        item.innerHTML = `
-            <label style="display:flex; align-items:center; width:100%; cursor:pointer;">
-                <input type="checkbox" value="${athlete.nome}" class="athlete-checkbox" ${checkedAttr}>
-                <span style="margin-left:10px;">
-                    <strong>${athlete.nome}</strong> (${athlete.apelido || ''}) - ${dataNascFormat}
+    checklist.innerHTML = athletes.map(a => {
+        const checked = isEditing && salvosIds.has(String(a.id)) ? 'checked' : '';
+        return `
+        <div class="checklist-item">
+            <label>
+                <input type="checkbox" value="${esc(a.nome)}" data-id="${esc(a.id)}" class="athlete-checkbox" ${checked} onchange="updateAttendanceCounter()">
+                <span class="checklist-name">
+                    <strong>${esc(a.nome)}</strong>
+                    <small>${esc(a.apelido || '')} • ${fmtDate(a.dataNasc)}</small>
                 </span>
             </label>
-        `;
-        checklist.appendChild(item);
-    });
+        </div>`;
+    }).join('');
+
+    updateAttendanceCounter();
 }
 
 function saveAttendance(event) {
     event.preventDefault();
-    
-    const id = document.getElementById('attendanceId').value;
-    const data = document.getElementById('chamadaData').value;
-    const turma = document.getElementById('chamadaTurma').value;
-    const obs = document.getElementById('chamadaObs').value.trim();
 
-    if (!data || !turma) {
-        alert('Selecione a data e a turma.');
-        return;
-    }
+    const id = $('attendanceId').value;
+    const data = $('chamadaData').value;
+    const turma = $('chamadaTurma').value;
+    const obs = $('chamadaObs').value.trim();
 
-    const checkboxes = document.querySelectorAll('.athlete-checkbox:checked');
-    const presentes = Array.from(checkboxes).map(cb => cb.value);
+    if (!data || !turma) { toast('Selecione a data e a turma.', 'error'); return; }
 
-    const recordData = {
-        id: id || Date.now().toString(),
-        data,
-        turma,
-        obs: obs || '-',
-        presentes
-    };
+    // Grava sempre o nome canônico do cadastro (evita vínculos quebrados)
+    const presentes = Array.from(document.querySelectorAll('.athlete-checkbox:checked')).map(cb => {
+        const a = globalAthletes.find(x => String(x.id) === cb.dataset.id);
+        return a ? a.nome : cb.value;
+    });
+
+    const duplicada = globalAttendance.find(r =>
+        r.data === data && r.turma === turma && String(r.id) !== String(id));
+    if (duplicada && !confirm('Já existe uma chamada para esta turma nesta data. Deseja salvar mesmo assim?')) return;
+
+    // Chamadas usam ID por timestamp — é o padrão já existente na base
+    // (ex.: "1785168791917") e não colide entre aparelhos diferentes.
+    const record = { id: id || Date.now().toString(), data, turma, obs: obs || '-', presentes };
 
     if (id) {
-        const index = globalAttendance.findIndex(r => r.id === id);
-        if (index !== -1) globalAttendance[index] = recordData;
+        const i = globalAttendance.findIndex(r => String(r.id) === String(id));
+        if (i !== -1) globalAttendance[i] = record;
     } else {
-        globalAttendance.push(recordData);
+        globalAttendance.push(record);
     }
 
-    saveData('attendance', recordData);
-    alert(`Chamada salva com sucesso! ${presentes.length} presente(s).`);
-
+    saveData('attendance', record);
+    toast(`Chamada salva! ${presentes.length} presente(s).`);
     cancelAttendanceEdit();
     showTab(2);
 }
 
 function editAttendance(id) {
-    const record = globalAttendance.find(r => r.id === id);
-    if (!record) return;
+    const r = globalAttendance.find(x => String(x.id) === String(id));
+    if (!r) return;
 
-    document.getElementById('attendanceId').value = record.id;
-    document.getElementById('chamadaData').value = record.data;
-    document.getElementById('chamadaTurma').value = record.turma;
-    document.getElementById('chamadaObs').value = record.obs === '-' ? '' : (record.obs || '');
-    
-    document.getElementById('attendanceFormTitle').textContent = 'Editar Chamada Salva';
-    document.getElementById('btnSaveAttendance').textContent = 'Atualizar Chamada';
-    document.getElementById('btnCancelAttendanceEdit').classList.remove('hidden');
+    $('attendanceId').value = r.id;
+    $('chamadaData').value = r.data;
+    $('chamadaTurma').value = r.turma;
+    $('chamadaObs').value = r.obs === '-' ? '' : (r.obs || '');
+    $('attendanceFormTitle').textContent = 'Editar Chamada Salva';
+    $('btnSaveAttendance').textContent = 'Atualizar Chamada';
+    $('btnCancelAttendanceEdit').classList.remove('hidden');
 
-    // Carrega a lista passando explicitamente os presentes salvos para manter o estado correto
-    loadAttendanceList(record.presentes || []);
+    loadAttendanceList(r.presentes || []);
+    closeModal();
     showTab(1);
 }
 
 function cancelAttendanceEdit() {
-    document.getElementById('attendanceId').value = '';
-    document.getElementById('attendanceForm').reset();
-    document.getElementById('chamadaObs').value = '';
-    document.getElementById('attendanceFormTitle').textContent = 'Registrar Nova Chamada';
-    document.getElementById('btnSaveAttendance').textContent = 'Salvar Chamada';
-    document.getElementById('btnCancelAttendanceEdit').classList.add('hidden');
-    document.getElementById('attendanceChecklist').innerHTML = '<p class="empty-msg">Selecione a data e a turma acima para carregar a lista de atletas.</p>';
-    
-    const today = new Date().toISOString().split('T')[0];
-    document.getElementById('chamadaData').value = today;
+    $('attendanceId').value = '';
+    $('attendanceForm').reset();
+    $('chamadaObs').value = '';
+    $('attendanceFormTitle').textContent = 'Registrar Nova Chamada';
+    $('btnSaveAttendance').textContent = 'Salvar Chamada';
+    $('btnCancelAttendanceEdit').classList.add('hidden');
+    $('attendanceChecklist').innerHTML = '<p class="empty-msg">Selecione a data e a turma acima para carregar a lista de atletas.</p>';
+    $('chamadaData').value = todayISO();
+    updateAttendanceCounter();
 }
 
 function deleteAttendance(id) {
-    if (confirm('Deseja excluir este registro de chamada?')) {
-        globalAttendance = globalAttendance.filter(r => r.id !== id);
-        deleteAttendanceFromCloud(id);
-        renderAttendanceHistory();
-    }
+    if (!confirm('Excluir este registro de chamada?')) return;
+    globalAttendance = globalAttendance.filter(r => String(r.id) !== String(id));
+    deleteAttendanceFromCloud(id);
+    closeModal();
+    renderAttendanceHistory();
+    toast('Chamada excluída.');
 }
 
 function getFilteredAttendances() {
-    const dtInicio = document.getElementById('filterDataInicio').value;
-    const dtFim = document.getElementById('filterDataFim').value;
-
-    let filtered = [...globalAttendance];
-
-    if (dtInicio) {
-        filtered = filtered.filter(r => r.data >= dtInicio);
-    }
-    if (dtFim) {
-        filtered = filtered.filter(r => r.data <= dtFim);
-    }
-
-    return filtered;
+    const ini = $('filterDataInicio').value;
+    const fim = $('filterDataFim').value;
+    let list = [...globalAttendance];
+    if (ini) list = list.filter(r => r.data >= ini);
+    if (fim) list = list.filter(r => r.data <= fim);
+    return list;
 }
 
 function clearDateFilter() {
-    document.getElementById('filterDataInicio').value = '';
-    document.getElementById('filterDataFim').value = '';
+    $('filterDataInicio').value = '';
+    $('filterDataFim').value = '';
     renderAttendanceHistory();
 }
 
 function renderAttendanceHistory() {
-    const tbody = document.getElementById('attendanceTableBody');
-    tbody.innerHTML = '';
-
+    const tbody = $('attendanceTableBody');
     const records = getFilteredAttendances();
 
-    if (records.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="5" class="empty-msg">Nenhuma chamada encontrada para o período selecionado.</td></tr>`;
+    if (!records.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-msg">Nenhuma chamada encontrada para o período selecionado.</td></tr>';
         return;
     }
 
-    records.sort((a, b) => b.data.localeCompare(a.data));
+    records.sort((a, b) => String(b.data).localeCompare(String(a.data)));
 
-    records.forEach(record => {
-        const tr = document.createElement('tr');
-        const dataFormatada = record.data ? record.data.split('-').reverse().join('/') : '-';
-        const qtdPresentes = record.presentes ? record.presentes.length : 0;
-        
-        tr.innerHTML = `
-            <td><strong>${dataFormatada}</strong></td>
-            <td>${record.turma}</td>
-            <td><span style="color:#84cc16; font-weight:bold;">${qtdPresentes} presente(s)</span></td>
-            <td><small style="color:#ccc;">${record.obs || '-'}</small></td>
-            <td style="white-space: nowrap;">
-                <button class="btn-action btn-view" onclick="viewAttendance('${record.id}')">Detalhes</button>
-                <button class="btn-action btn-edit" onclick="editAttendance('${record.id}')">Editar</button>
-                <button class="btn-action btn-delete" onclick="deleteAttendance('${record.id}')">Excluir</button>
+    tbody.innerHTML = records.map(r => `
+        <tr>
+            <td class="cell-main" data-label="Data"><strong>${fmtDate(r.data)}</strong></td>
+            <td data-label="Turma"><span class="turma-badge">${esc(r.turma)}</span></td>
+            <td data-label="Presentes"><span style="color:var(--brand);font-weight:700;">${(r.presentes || []).length} presente(s)</span></td>
+            <td data-label="Observações"><small style="color:#ccd3ce;">${esc(r.obs || '-')}</small></td>
+            <td class="actions-cell" data-label="">
+                <button class="btn-action btn-view" onclick="viewAttendance('${esc(r.id)}')">Detalhes</button>
+                <button class="btn-action btn-edit" onclick="editAttendance('${esc(r.id)}')">Editar</button>
+                <button class="btn-action btn-delete" onclick="deleteAttendance('${esc(r.id)}')">Excluir</button>
             </td>
-        `;
-        tbody.appendChild(tr);
-    });
+        </tr>`).join('');
 }
 
 function viewAttendance(id) {
-    const record = globalAttendance.find(r => r.id === id);
-    if (!record) return;
+    const r = globalAttendance.find(x => String(x.id) === String(id));
+    if (!r) return;
+    const { presentes, ausentes } = attendanceLists(r);
 
-    const turmaAthletes = globalAthletes.filter(a => a.turma === record.turma && (!a.dataCadastro || a.dataCadastro <= record.data));
-    const dataFormatada = record.data ? record.data.split('-').reverse().join('/') : '-';
-    const presentesList = record.presentes || [];
+    const li = (a, ok) => `<li style="color:${ok ? 'var(--brand)' : 'var(--danger)'};margin-bottom:5px;">
+        ${ok ? '✔' : '✖'} <strong>${esc(a.nome)}</strong> <small style="color:var(--text-dim)">(${esc(a.apelido || '')}) ${fmtDate(a.dataNasc)}</small></li>`;
 
-    const presentes = turmaAthletes.filter(a => presentesList.includes(a.nome));
-    const ausentes = turmaAthletes.filter(a => !presentesList.includes(a.nome));
-
-    let presentesHtml = presentes.length > 0 
-        ? presentes.map(p => {
-            const dtNasc = p.dataNasc ? p.dataNasc.split('-').reverse().join('/') : '-';
-            return `<li style="margin-left:20px; color:#84cc16; margin-bottom:4px;">✔ <strong>${p.nome}</strong> (${p.apelido || ''}) - ${dtNasc}</li>`;
-          }).join('')
-        : '<p style="color:#aaa; font-style:italic;">Nenhum presente.</p>';
-
-    let ausentesHtml = ausentes.length > 0 
-        ? ausentes.map(a => {
-            const dtNasc = a.dataNasc ? a.dataNasc.split('-').reverse().join('/') : '-';
-            return `<li style="margin-left:20px; color:#ef4444; margin-bottom:4px;">✖ <strong>${a.nome}</strong> (${a.apelido || ''}) - ${dtNasc}</li>`;
-          }).join('')
-        : '<p style="color:#aaa; font-style:italic;">Nenhuma falta.</p>';
-
-    document.getElementById('modalDetails').innerHTML = `
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
-            <h3 style="color:#fff;">Chamada - ${dataFormatada}</h3>
-            <button class="primary" style="padding:6px 12px; font-size:0.85rem;" onclick="openSingleAttendanceTab('${record.id}')">🚀 Abrir / Gerar PDF</button>
-        </div>
-        <p style="color:#aaa; margin-bottom:5px;">Turma: <strong>${record.turma}</strong></p>
-        <p style="color:#aaa; margin-bottom:10px;"><strong>Observação do Treino:</strong> ${record.obs || '-'}</p>
-        <hr style="border:0; border-top:1px solid #333; margin:15px 0;">
-        <h4 style="color:#84cc16;">Atletas Presentes (${presentes.length}):</h4>
-        <ul style="list-style:none; padding:0;">${presentesHtml}</ul>
-        <hr style="border:0; border-top:1px dashed #333; margin:15px 0;">
-        <h4 style="color:#ef4444;">Atletas Ausentes / Faltas (${ausentes.length}):</h4>
-        <ul style="list-style:none; padding:0;">${ausentesHtml}</ul>
-    `;
-
-    document.getElementById('modal').classList.remove('hidden');
+    $('modalDetails').innerHTML = `
+        <h3>Chamada — ${fmtDate(r.data)}</h3>
+        <p style="color:var(--text-dim);margin:6px 0;">Turma: <strong>${esc(r.turma)}</strong></p>
+        <p style="color:var(--text-dim);margin-bottom:12px;">Observação: ${esc(r.obs || '-')}</p>
+        <button class="primary" style="width:100%;margin-bottom:14px;" onclick="openSingleAttendanceTab('${esc(r.id)}')">🚀 Abrir / Gerar PDF</button>
+        <h4 style="color:var(--brand);margin-bottom:6px;">Presentes (${presentes.length})</h4>
+        <ul style="list-style:none;padding:0;">${presentes.length ? presentes.map(a => li(a, true)).join('') : '<li style="color:var(--text-mute)">Nenhum.</li>'}</ul>
+        <hr style="border:0;border-top:1px dashed var(--line);margin:14px 0;">
+        <h4 style="color:var(--danger);margin-bottom:6px;">Ausentes (${ausentes.length})</h4>
+        <ul style="list-style:none;padding:0;">${ausentes.length ? ausentes.map(a => li(a, false)).join('') : '<li style="color:var(--text-mute)">Nenhuma falta.</li>'}</ul>`;
+    openModal();
 }
 
-// --- VISUALIZAÇÃO/COMPARTILHAMENTO DE UMA ÚNICA CHAMADA ---
-
-function buildSingleAttendanceHTML(recordId) {
-    const record = globalAttendance.find(r => r.id === recordId);
-    if (!record) return null;
-
-    const turmaAthletes = globalAthletes.filter(a => a.turma === record.turma && (!a.dataCadastro || a.dataCadastro <= record.data));
-    const dataFormatada = record.data ? record.data.split('-').reverse().join('/') : '-';
-    const presentesList = record.presentes || [];
-
-    const presentes = turmaAthletes.filter(a => presentesList.includes(a.nome));
-    const ausentes = turmaAthletes.filter(a => !presentesList.includes(a.nome));
-
-    return `
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Chamada - ${dataFormatada} - Prosol Academy</title>
-            <style>
-                @page { size: A4 portrait; margin: 8mm; }
-                body { font-family: Arial, sans-serif; color: #111; padding: 10px; line-height: 1.25; font-size: 0.8rem; background: #fff; }
-                #no-print-area { display: flex; gap: 10px; margin-bottom: 15px; background: #f1f5f9; padding: 10px; border-radius: 6px; border: 1px solid #cbd5e1; }
-                .btn-print { background-color: #84cc16; color: #000; font-weight: bold; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
-                .btn-share-pdf { background-color: #25d366; color: #fff; font-weight: bold; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
-                .info-box { background: #f4f9eb; padding: 8px 12px; border-radius: 4px; border: 1px solid #d9f99d; margin-bottom: 12px; }
-                h3 { color: #4d7c0f; border-bottom: 1px solid #ccc; padding-bottom: 3px; margin-top: 12px; font-size: 0.9rem; }
-                ul { list-style-type: none; padding-left: 0; margin-top: 4px; }
-                li { padding: 3px 0; border-bottom: 1px dotted #eee; font-size: 0.78rem; }
-                .presente { color: #15803d; font-weight: bold; }
-                .falta { color: #b91c1c; font-weight: bold; }
-                @media print { #no-print-area { display: none !important; } body { padding: 0; } }
-            </style>
-            ${getPDFScriptTag()}
-        </head>
-        <body>
-            <div id="no-print-area">
-                <button class="btn-share-pdf" onclick="sharePagePDF('Chamada_Prosol_${record.data}.pdf', 'portrait')">📥 BAIXAR ESTA CHAMADA EM PDF</button>
-                <button class="btn-print" onclick="window.print()">🖨️ Imprimir / Salvar PDF Nativo</button>
-            </div>
-
-            <div id="pdf-content-area">
-                ${generatePrintHeader()}
-                
-                <div class="info-box">
-                    <p style="margin:0 0 3px;"><strong>Data da Aula:</strong> ${dataFormatada}</p>
-                    <p style="margin:0 0 3px;"><strong>Turma:</strong> ${record.turma}</p>
-                    <p style="margin:0;"><strong>Informação / Observação do Treino:</strong> ${record.obs || 'Nenhuma observação informada.'}</p>
-                </div>
-
-                <h3>Atletas Presentes (${presentes.length})</h3>
-                <ul>
-                    ${presentes.length > 0 
-                        ? presentes.map(p => `<li class="presente">✔ ${p.nome} (${p.apelido || ''}) - ${p.dataNasc ? p.dataNasc.split('-').reverse().join('/') : '-'}</li>`).join('') 
-                        : '<li>Nenhum atleta presente registrado.</li>'}
-                </ul>
-
-                <h3>Atletas Ausentes / Faltas (${ausentes.length})</h3>
-                <ul>
-                    ${ausentes.length > 0 
-                        ? ausentes.map(a => `<li class="falta">✖ ${a.nome} (${a.apelido || ''}) - ${a.dataNasc ? a.dataNasc.split('-').reverse().join('/') : '-'}</li>`).join('') 
-                        : '<li>Nenhuma falta registrada.</li>'}
-                </ul>
-            </div>
-        </body>
-        </html>
-    `;
-}
-
-function openSingleAttendanceTab(recordId) {
-    const htmlContent = buildSingleAttendanceHTML(recordId);
-    if (!htmlContent) return;
-
-    const printWin = window.open('', '_blank');
-    printWin.document.write(htmlContent);
-    printWin.document.close();
-    printWin.focus();
-}
-
-// --- VISUALIZAÇÃO/COMPARTILHAMENTO DE CHAMADAS FILTRADAS ---
-
-function buildFilteredAttendancesHTML() {
-    const records = getFilteredAttendances();
-    if (records.length === 0) return null;
-
-    records.sort((a, b) => b.data.localeCompare(a.data));
-
-    const dtIni = document.getElementById('filterDataInicio').value;
-    const dtFim = document.getElementById('filterDataFim').value;
-    let periodoTexto = "Todas as chamadas cadastradas";
-
-    if (dtIni || dtFim) {
-        const iFmt = dtIni ? dtIni.split('-').reverse().join('/') : 'Início';
-        const fFmt = dtFim ? dtFim.split('-').reverse().join('/') : 'Atual';
-        periodoTexto = `Período de ${iFmt} até ${fFmt}`;
-    }
-
-    let recordsHtml = '';
-
-    records.forEach(record => {
-        const turmaAthletes = globalAthletes.filter(a => a.turma === record.turma && (!a.dataCadastro || a.dataCadastro <= record.data));
-        const dataFormatada = record.data ? record.data.split('-').reverse().join('/') : '-';
-        const presentesList = record.presentes || [];
-
-        const presentes = turmaAthletes.filter(a => presentesList.includes(a.nome));
-        const ausentes = turmaAthletes.filter(a => !presentesList.includes(a.nome));
-
-        recordsHtml += `
-            <div style="page-break-inside: avoid; border: 1px solid #d9f99d; padding: 10px; border-radius: 4px; margin-bottom: 12px; background: #fafdf5;">
-                <h2 style="margin: 0 0 6px; color: #4d7c0f; font-size: 0.95rem; border-bottom: 1px solid #e5e7eb; padding-bottom: 3px;">
-                    📅 Aula: ${dataFormatada} - Turma: ${record.turma}
-                </h2>
-                <p style="margin: 0 0 6px; font-size: 0.78rem; color: #444;">
-                    <strong>Observações do Treino:</strong> ${record.obs || 'Nenhuma'}
-                </p>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                    <div>
-                        <h4 style="margin: 3px 0; color: #15803d; font-size:0.8rem;">Presentes (${presentes.length}):</h4>
-                        <ul style="padding-left: 12px; margin: 0; font-size: 0.75rem;">
-                            ${presentes.length > 0 
-                                ? presentes.map(p => `<li style="color:#15803d;">✔ ${p.nome} (${p.apelido || ''}) - ${p.dataNasc ? p.dataNasc.split('-').reverse().join('/') : '-'}</li>`).join('')
-                                : '<li style="color:#888;">Nenhum</li>'}
-                        </ul>
-                    </div>
-                    <div>
-                        <h4 style="margin: 3px 0; color: #b91c1c; font-size:0.8rem;">Ausentes (${ausentes.length}):</h4>
-                        <ul style="padding-left: 12px; margin: 0; font-size: 0.75rem;">
-                            ${ausentes.length > 0 
-                                ? ausentes.map(a => `<li style="color:#b91c1c;">✖ ${a.nome} (${a.apelido || ''}) - ${a.dataNasc ? a.dataNasc.split('-').reverse().join('/') : '-'}</li>`).join('')
-                                : '<li style="color:#888;">Nenhum</li>'}
-                        </ul>
-                    </div>
-                </div>
-            </div>
-        `;
-    });
-
-    return `
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Relatório de Chamadas - Prosol Academy</title>
-            <style>
-                @page { size: A4 portrait; margin: 8mm; }
-                body { font-family: Arial, sans-serif; color: #111; padding: 10px; line-height: 1.25; font-size: 0.8rem; background: #fff; }
-                #no-print-area { display: flex; gap: 10px; margin-bottom: 15px; background: #f1f5f9; padding: 10px; border-radius: 6px; border: 1px solid #cbd5e1; }
-                .btn-print { background-color: #84cc16; color: #000; font-weight: bold; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
-                .btn-share-pdf { background-color: #25d366; color: #fff; font-weight: bold; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
-                @media print { #no-print-area { display: none !important; } body { padding: 0; } }
-            </style>
-            ${getPDFScriptTag()}
-        </head>
-        <body>
-            <div id="no-print-area">
-                <button class="btn-share-pdf" onclick="sharePagePDF('Relatorio_Chamadas_Prosol.pdf', 'portrait')">📥 BAIXAR ESTE RELATÓRIO EM PDF</button>
-                <button class="btn-print" onclick="window.print()">🖨️ Imprimir / Salvar PDF Nativo</button>
-            </div>
-
-            <div id="pdf-content-area">
-                ${generatePrintHeader()}
-                <p style="font-size: 0.9rem; font-weight: bold; margin-bottom: 12px; color: #333;">
-                    📋 ${periodoTexto} (${records.length} registro(s))
-                </p>
-                ${recordsHtml}
-            </div>
-        </body>
-        </html>
-    `;
-}
-
-function openFilteredAttendancesTab() {
-    const htmlContent = buildFilteredAttendancesHTML();
-    if (!htmlContent) {
-        alert('Nenhuma chamada encontrada para abrir o relatório.');
-        return;
-    }
-
-    const printWin = window.open('', '_blank');
-    printWin.document.write(htmlContent);
-    printWin.document.close();
-    printWin.focus();
-}
-
-// --- RELATÓRIO DE FREQUÊNCIA ---
+/* --------------------------------------------------------------------------
+   10. RELATÓRIO DE FREQUÊNCIA
+   -------------------------------------------------------------------------- */
+function pctClass(p) { if (p === null) return ''; return p >= 75 ? 'pct-good' : (p >= 50 ? 'pct-mid' : 'pct-bad'); }
 
 function renderAttendanceReport() {
-    const tbody = document.getElementById('reportTableBody');
+    const tbody = $('reportTableBody');
     if (!tbody) return;
 
-    tbody.innerHTML = '';
+    const filtro = $('filterTurmaReport') ? $('filterTurmaReport').value : 'TODAS';
+    let list = [...globalAthletes];
+    if (filtro && filtro !== 'TODAS') list = list.filter(a => a.turma === filtro);
+    list.sort((a, b) => (a.turma || '').localeCompare(b.turma || '') || (a.nome || '').localeCompare(b.nome || '', 'pt-BR'));
 
-    if (globalAthletes.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="7" class="empty-msg">Nenhum atleta cadastrado.</td></tr>`;
+    if (!list.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty-msg">Nenhum atleta cadastrado.</td></tr>';
         return;
     }
 
-    globalAthletes.forEach(athlete => {
-        const todasAulasTurma = globalAttendance.filter(h => h.turma === athlete.turma);
-        const totalAulasGeral = todasAulasTurma.length;
-
-        const aulasPosCadastro = todasAulasTurma.filter(h => !athlete.dataCadastro || h.data >= athlete.dataCadastro);
-        const totalAulasPos = aulasPosCadastro.length;
-
-        const presencas = todasAulasTurma.filter(h => h.presentes && h.presentes.includes(athlete.nome)).length;
-        const faltasPos = totalAulasPos - presencas;
-
-        const pctPos = totalAulasPos > 0 ? Math.round((presencas / totalAulasPos) * 100) : 0;
-        const pctGeral = totalAulasGeral > 0 ? Math.round((presencas / totalAulasGeral) * 100) : 0;
-
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-            <td><strong>${athlete.nome}</strong></td>
-            <td><span style="background:#2a2a2a; padding:4px 8px; border-radius:4px; font-size:0.85rem;">${athlete.turma}</span></td>
-            <td><strong style="color:#84cc16;">${presencas}</strong></td>
-            <td><strong style="color:#ef4444;">${faltasPos}</strong></td>
-            <td>
-                <span style="font-weight:bold; color: ${pctPos >= 75 ? '#84cc16' : (pctPos >= 50 ? '#f59e0b' : '#ef4444')};">
-                    ${pctPos}%
-                </span>
+    tbody.innerHTML = list.map(a => {
+        const s = athleteStats(a);
+        return `
+        <tr>
+            <td class="cell-main" data-label="Atleta"><strong>${esc(a.nome)}</strong></td>
+            <td data-label="Turma"><span class="turma-badge">${esc(a.turma)}</span></td>
+            <td data-label="Presenças"><strong style="color:var(--brand);">${s.presencas}</strong></td>
+            <td data-label="Faltas"><strong style="color:var(--danger);">${s.faltasPos}</strong></td>
+            <td data-label="Freq. pós-cadastro"><span class="pct-pill ${pctClass(s.pctPos)}">${pctText(s.pctPos)}</span></td>
+            <td data-label="Freq. geral"><span style="color:var(--text-dim);">${pctText(s.pctGeral)}</span></td>
+            <td class="actions-cell" data-label="">
+                <button class="btn-action btn-view" onclick="viewAthleteDates('${esc(a.id)}')">🔍 Ver dias</button>
             </td>
-            <td>
-                <span style="color:#aaa;">
-                    ${pctGeral}%
-                </span>
-            </td>
-            <td>
-                <button class="btn-action btn-view" title="Ver dias" onclick="viewAthleteDates('${athlete.id}')">🔍</button>
-            </td>
-        `;
-        tbody.appendChild(tr);
-    });
+        </tr>`;
+    }).join('');
 }
 
 function viewAthleteDates(athleteId) {
-    const athlete = globalAthletes.find(a => a.id === athleteId);
-    if (!athlete) return;
+    const a = globalAthletes.find(x => String(x.id) === String(athleteId));
+    if (!a) return;
 
-    const turmasAulas = globalAttendance.filter(h => h.turma === athlete.turma && (!athlete.dataCadastro || h.data >= athlete.dataCadastro));
+    const s = athleteStats(a);
+    const aulas = globalAttendance
+        .filter(h => h.turma === a.turma && (!s.corte || h.data >= s.corte))
+        .sort((x, y) => String(y.data).localeCompare(String(x.data)));
 
-    let datesListHtml = '';
-
-    if (turmasAulas.length === 0) {
-        datesListHtml = '<p style="color:#aaa; font-style:italic;">Nenhuma aula registrada após o cadastro deste atleta.</p>';
+    let html;
+    if (!aulas.length) {
+        html = '<p class="empty-msg">Nenhuma aula registrada após o cadastro deste atleta.</p>';
     } else {
-        datesListHtml = '<div style="max-height:250px; overflow-y:auto; margin-top:10px;">';
-        turmasAulas.forEach(aula => {
-            const foiPresente = aula.presentes && aula.presentes.includes(athlete.nome);
-            const dataFormatada = aula.data ? aula.data.split('-').reverse().join('/') : '-';
-
-            let statusTag = '';
-            let borderStyle = '';
-
-            if (foiPresente) {
-                statusTag = '<span style="font-weight:bold; color:#84cc16;">✔ PRESENTE</span>';
-                borderStyle = 'border-left:4px solid #84cc16;';
-            } else {
-                statusTag = '<span style="font-weight:bold; color:#ef4444;">✖ FALTA</span>';
-                borderStyle = 'border-left:4px solid #ef4444;';
-            }
-            
-            datesListHtml += `
-                <div style="display:flex; justify-content:space-between; align-items:center; background:#222; padding:8px 12px; border-radius:6px; margin-bottom:6px; ${borderStyle}">
-                    <span>📅 <strong>${dataFormatada}</strong> <small style="color:#aaa; margin-left:8px;">(${aula.obs || 'Sem obs'})</small></span>
-                    ${statusTag}
-                </div>
-            `;
-        });
-        datesListHtml += '</div>';
+        html = '<div style="max-height:52vh;overflow-y:auto;margin-top:10px;">' + aulas.map(aula => {
+            const ok = presentIdSet(aula).has(String(a.id));
+            return `
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;background:var(--surface-2);
+                        padding:10px 12px;border-radius:8px;margin-bottom:6px;border-left:4px solid ${ok ? 'var(--brand)' : 'var(--danger)'};">
+                <span style="min-width:0;">📅 <strong>${fmtDate(aula.data)}</strong>
+                    <small style="color:var(--text-dim);display:block;">${esc(aula.obs && aula.obs !== '-' ? aula.obs : 'Sem observações')}</small>
+                </span>
+                <span style="font-weight:700;white-space:nowrap;color:${ok ? 'var(--brand)' : 'var(--danger)'};">${ok ? '✔ PRESENTE' : '✖ FALTA'}</span>
+            </div>`;
+        }).join('') + '</div>';
     }
 
-    const dataCadFormatada = athlete.dataCadastro ? athlete.dataCadastro.split('-').reverse().join('/') : '-';
-
-    document.getElementById('modalDetails').innerHTML = `
-        <h3 style="color:#fff;">🔍 Histórico de Presenças (Pós-Cadastro)</h3>
-        <h4 style="color:#84cc16;">${athlete.nome}</h4>
-        <p style="color:#aaa; font-size:0.85rem;">Turma: ${athlete.turma} | Cadastro em: ${dataCadFormatada}</p>
-        <hr style="border:0; border-top:1px solid #333; margin:10px 0;">
-        ${datesListHtml}
-    `;
-
-    document.getElementById('modal').classList.remove('hidden');
+    $('modalDetails').innerHTML = `
+        <h3>🔍 Histórico de Presenças</h3>
+        <h4 style="color:var(--brand);margin-top:4px;">${esc(a.nome)}</h4>
+        <p style="color:var(--text-dim);font-size:.84rem;">Turma: ${esc(a.turma)} • Cadastro: ${fmtDate(a.dataCadastro)}</p>
+        <hr style="border:0;border-top:1px solid var(--line);margin:10px 0;">
+        ${html}`;
+    openModal();
 }
+
+/* --------------------------------------------------------------------------
+   11. INICIALIZAÇÃO
+   -------------------------------------------------------------------------- */
+document.addEventListener('DOMContentLoaded', () => {
+    populateTurmaSelects();
+
+    const btn = $('btnEnter');
+    if (btn) btn.addEventListener('click', openApp);
+
+    // Fecha o modal ao tocar fora ou apertar ESC
+    const modal = $('modal');
+    modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
+    // Máscara simples de telefone
+    ['telefoneAtleta', 'telefone'].forEach(id => {
+        const el = $(id);
+        if (!el) return;
+        el.addEventListener('input', () => {
+            let v = el.value.replace(/\D/g, '').slice(0, 11);
+            if (v.length > 6) v = `(${v.slice(0, 2)}) ${v.slice(2, v.length - 4)}-${v.slice(-4)}`;
+            else if (v.length > 2) v = `(${v.slice(0, 2)}) ${v.slice(2)}`;
+            else if (v.length > 0) v = `(${v}`;
+            el.value = v;
+        });
+    });
+
+    window.addEventListener('online', () => { setSyncStatus('online', 'Online'); loadDataFromSupabase(); });
+    window.addEventListener('offline', () => setSyncStatus('offline', 'Offline'));
+});
