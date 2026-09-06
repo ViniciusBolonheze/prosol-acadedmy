@@ -362,14 +362,10 @@ async function deleteAttendanceFromCloud(id) {
    4. NAVEGAÇÃO
    -------------------------------------------------------------------------- */
 async function openApp() {
-    $('login').classList.remove('active');
-    $('login').style.display = 'none';
-    $('app').classList.add('active');
-
-    $('chamadaData').value = todayISO();
-
-    await loadDataFromSupabase();
-    renderAthletesTable();
+    const login=$('login'); if(login){ login.classList.remove('active'); login.style.display='none'; }
+    const app=$('app'); if(app) app.classList.add('active');
+    const dt=$('chamadaData'); if(dt) dt.value = todayISO();
+    loadDataFromSupabase().then(()=>renderAthletesTable());
 }
 
 function logout() {
@@ -1229,9 +1225,19 @@ function saveAttendance(event) {
     }
 
     saveData('attendance', record);
-    toast(`Chamada salva! ${presentes.length} presente(s).`);
-    cancelAttendanceEdit();
-    showTab(2);
+    popupChamadaSalva(presentes.length).then(()=>{
+        cancelAttendanceEdit();
+        showTab(0);
+    });
+}
+function popupChamadaSalva(qtd){
+    return new Promise(function(res){
+        const wrap=document.createElement('div');
+        wrap.className='ac-popup-bg';
+        wrap.innerHTML='<div class="ac-popup"><strong>Chamada salva</strong><p>'+qtd+' presente(s).</p><button type="button">OK</button></div>';
+        document.body.appendChild(wrap);
+        wrap.querySelector('button').onclick=function(){ wrap.remove(); res(); };
+    });
 }
 
 function editAttendance(id) {
@@ -1410,8 +1416,7 @@ function viewAthleteDates(athleteId) {
 document.addEventListener('DOMContentLoaded', () => {
     populateTurmaSelects();
 
-    const btn = $('btnEnter');
-    if (btn) btn.addEventListener('click', openApp);
+    openApp();
 
     // Fecha o modal ao tocar fora ou apertar ESC
     const modal = $('modal');

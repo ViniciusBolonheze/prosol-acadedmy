@@ -1043,3 +1043,9 @@ tbody tr:hover { background: rgba(255, 255, 255, .022); }
     body { background: #fff; color: #000; }
     .card { border: 1px solid #ccc; background: #fff; }
 }
+
+.ac-popup-bg{position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:200;padding:16px;}
+.ac-popup{background:#1e2220;color:#f1f5f2;border:2px solid #84cc16;border-radius:14px;padding:22px 20px;width:min(360px,92vw);text-align:center;box-shadow:0 12px 40px #0008;}
+.ac-popup strong{display:block;font-size:1.25rem;color:#84cc16;margin-bottom:8px;}
+.ac-popup p{margin:0 0 16px;color:#a7b0aa;}
+.ac-popup button{border:0;background:#84cc16;color:#101211;font-weight:800;padding:10px 22px;border-radius:10px;cursor:pointer;}
