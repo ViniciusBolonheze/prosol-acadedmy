@@ -916,6 +916,62 @@ tbody tr:hover { background: rgba(255, 255, 255, .022); }
     .filter-group-inline input { width: 100%; }
     .filter-period-inputs { flex-direction: column; align-items: stretch; width: 100%; }
 
+    .filter-box-compact > .filter-group-inline {
+        flex: none !important;
+        width: 100%;
+        min-height: 0;
+    }
+    .filter-group-inline input.search-input { min-height: 42px; }
+    .years-checkbox-container-inline {
+        overflow: visible !important;
+        flex-wrap: wrap !important;
+        max-width: 100%;
+        gap: 6px 8px;
+        padding: 8px;
+    }
+    .years-checkbox-container-inline label {
+        white-space: nowrap;
+        font-size: .78rem;
+        gap: 4px;
+    }
+
+    /* lista compacta: só nome, nascimento e ações */
+    #athletesGroups table td.cell-photo,
+    #athletesGroups table td[data-label="Foto"],
+    #athletesGroups table td[data-label="Turma"],
+    #athletesGroups table td[data-label="Indicação"],
+    #athletesGroups table td[data-label="Responsável"] { display: none !important; }
+    #athletesGroups .mobile-athlete-head .only-mobile { display: none !important; }
+    #athletesGroups table tr {
+        margin-bottom: 6px;
+        padding: 6px 8px;
+        border-radius: 8px;
+    }
+    #athletesGroups table td {
+        padding: 4px 0;
+        font-size: .82rem;
+    }
+    #athletesGroups table td.cell-main {
+        padding: 2px 0 4px;
+    }
+    #athletesGroups table td.cell-main strong { font-size: .92rem; }
+    #athletesGroups table td[data-label="Nascimento"] {
+        justify-content: flex-start;
+        gap: 8px;
+        font-size: .8rem;
+        color: var(--text-dim);
+    }
+    #athletesGroups .actions-cell {
+        gap: 4px !important;
+        padding-top: 4px !important;
+    }
+    #athletesGroups .btn-action {
+        padding: 4px 7px !important;
+        font-size: .7rem !important;
+        min-height: 28px;
+        border-radius: 6px;
+    }
+
     .report-checkboxes { grid-template-columns: 1fr 1fr; }
 
     /* --- TABELAS VIRAM CARDS --- */

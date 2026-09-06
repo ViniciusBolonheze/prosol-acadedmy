@@ -369,10 +369,12 @@ async function openApp() {
 }
 
 function logout() {
-    $('app').classList.remove('active');
-    $('login').style.display = '';
-    $('login').classList.add('active');
-    window.scrollTo(0, 0);
+    window.close();
+    setTimeout(function(){
+        if (!document.hidden) {
+            toast('Feche esta aba para voltar ao Principal.', 'warn');
+        }
+    }, 250);
 }
 
 let currentTab = 0;
