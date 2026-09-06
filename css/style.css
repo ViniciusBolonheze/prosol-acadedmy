@@ -447,6 +447,22 @@ input[type="checkbox"] {
     overflow-x: auto;
 }
 
+.year-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    min-width: 76px;
+    margin: 0;
+}
+.year-chip input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    flex-shrink: 0;
+    accent-color: var(--brand);
+}
+.year-chip span { line-height: 1; }
 .years-checkbox-container-inline label {
     font-size: .84rem;
     cursor: pointer;
@@ -839,6 +855,7 @@ tbody tr:hover { background: rgba(255, 255, 255, .022); }
 /* ==========================================================================
    ======================  RESPONSIVO: CELULAR  =============================
    ========================================================================== */
+.btn-filtros-mob { display: none; }
 @media (max-width: 780px) {
 
     body { font-size: 15px; }
@@ -915,6 +932,26 @@ tbody tr:hover { background: rgba(255, 255, 255, .022); }
     .filter-group-inline select,
     .filter-group-inline input { width: 100%; }
     .filter-period-inputs { flex-direction: column; align-items: stretch; width: 100%; }
+
+
+    .btn-filtros-mob {
+        display: block;
+        width: 100%;
+        margin: 8px 0 10px;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        background: var(--surface-2);
+        color: var(--text);
+        border-radius: 10px;
+        font-weight: 800;
+        font-size: .9rem;
+        cursor: pointer;
+    }
+    .btn-filtros-mob.open { border-color: var(--brand); color: var(--brand); }
+    .filter-box-compact { display: none !important; }
+    .filter-box-compact.open { display: flex !important; }
+    .year-chip { min-width: 82px; padding: 4px 0; }
+    .year-chip input[type="checkbox"] { width: 18px; height: 18px; }
 
     .filter-box-compact > .filter-group-inline {
         flex: none !important;

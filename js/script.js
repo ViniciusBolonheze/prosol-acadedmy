@@ -635,8 +635,15 @@ function updateYearCheckboxes() {
 
     const checked = Array.from(document.querySelectorAll('.filter-year-cb:checked')).map(cb => cb.value);
     container.innerHTML = years.map(y =>
-        `<label><input type="checkbox" value="${y}" class="filter-year-cb" ${checked.includes(y) ? 'checked' : ''} onchange="applyFilters()"> ${y}</label>`
+        `<label class="year-chip"><input type="checkbox" value="${y}" class="filter-year-cb" ${checked.includes(y) ? 'checked' : ''} onchange="applyFilters()"><span>${y}</span></label>`
     ).join('');
+}
+function toggleAthleteFilters(){
+    const box=$('athleteFiltersBox');
+    const btn=$('btnToggleAthleteFilters');
+    if(!box) return;
+    box.classList.toggle('open');
+    if(btn) btn.classList.toggle('open', box.classList.contains('open'));
 }
 
 function applyFilters() {
