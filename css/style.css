@@ -230,7 +230,7 @@ header {
 /* ==========================================================================
    NAVEGAÇÃO (abas)
    ========================================================================== */
-nav {
+nav.top-tabs {
     display: flex;
     background-color: var(--bg-2);
     border-bottom: 1px solid var(--line);
@@ -240,7 +240,7 @@ nav {
     top: var(--header-h);
     z-index: 55;
 }
-nav::-webkit-scrollbar { display: none; }
+nav.top-tabs::-webkit-scrollbar { display: none; }
 
 .tab-btn {
     background: none;
@@ -859,8 +859,13 @@ tbody tr:hover { background: rgba(255, 255, 255, .022); }
 
     .bottom-nav {
         display: flex;
+        flex-direction: row;
+        align-items: stretch;
         position: fixed;
-        bottom: 0; left: 0; right: 0;
+        left: 0; right: 0; bottom: 0;
+        top: auto !important;
+        height: auto;
+        max-height: calc(var(--bottomnav-h) + var(--safe-b) + 8px);
         background: var(--bg-2);
         border-top: 1px solid var(--line);
         z-index: 90;
@@ -868,7 +873,7 @@ tbody tr:hover { background: rgba(255, 255, 255, .022); }
         box-shadow: 0 -4px 18px rgba(0,0,0,.4);
     }
     .bottom-nav button {
-        flex: 1;
+        flex: 1 1 0;
         background: none;
         border: none;
         color: var(--text-mute);
@@ -878,7 +883,9 @@ tbody tr:hover { background: rgba(255, 255, 255, .022); }
         justify-content: center;
         gap: 3px;
         padding: 8px 2px;
-        min-height: var(--bottomnav-h);
+        min-height: 56px;
+        max-height: 70px;
+        height: var(--bottomnav-h);
         font-size: .66rem;
         font-weight: 600;
         cursor: pointer;
